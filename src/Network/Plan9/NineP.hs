@@ -69,7 +69,7 @@
  -    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  -}
 
-module NineP ( 
+module Network.Plan9.NineP ( 
                   -- * Bin - a little endian encode/decode class for Bin values
                    Bin(..)
                   -- * Qid - Server side data type for path tracking (<http://9p.cat-v.org> for details)
@@ -87,10 +87,10 @@ module NineP (
                   , NineMsg(..)
                           
                   -- ** putNineMsg - function that can encode all NineMsg types to a lazy ByteString
-                  , putNineMsg
+                  , putNineMsg, putNinePkt
 
                   -- ** getNineMsg - function to decode all NineMsg types from a lazy ByteString
-                  , getNineMsg
+                  , getNineMsg, decodeNinePkt, getNinePkt
 
                   -- * Example
                   -- $example
@@ -100,18 +100,17 @@ import Control.Applicative
 import Control.Monad
 import Data.Binary.Get
 import Data.Binary.Put
-import Data.Char
+--import Data.Char
 import Data.Word
 
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
 
--- | permission bits
-import Data.Monoid ((<>), mconcat)
+--import Data.Monoid((<>), mconcat)
 
-import Data.Text.Encoding (encodeUtf8, decodeUtf8)
-import qualified Data.Text as T
-import Data.Text (Text)
+import Data.Text(Text)
+--import qualified Data.Text as T
+import Data.Text.Encoding(encodeUtf8, decodeUtf8)
 
 {-
 import Debug.Trace 
@@ -139,9 +138,11 @@ instance Bin Word64 where
     get = getWord64le
     put = putWord64le
 
+{-
 instance Bin Char where
     get = chr . fromIntegral <$> getWord8
     put = putWord8 . fromIntegral . ord
+-}
 
 instance Bin Text where
     get = getWord16le >>= \ sz -> decodeUtf8 <$> getBytes (fromIntegral sz)
@@ -158,7 +159,7 @@ data Qid = Qid {
     qid_path :: Word64 -- qid.path[8] the file server's unique identification
 		       --   for the file 
 } deriving (Eq, Ord, Show)
-
+emptyQid :: Qid
 emptyQid = Qid {
     qid_typ = 0,
     qid_vers = 0,
@@ -203,7 +204,7 @@ data Stat = Stat {
     st_n_muid :: Word32 -- n_muid[4] numeric id of the user who last modified the file 
 -}
 } deriving (Eq, Ord, Show)
-
+emptyStat :: Stat
 emptyStat = Stat {
     st_typ = 0,
     st_dev = 0,
@@ -442,9 +443,10 @@ putNineMsg msg = case msg of
 	(Twstat a b) -> put a >> putNestList16 b
 	(Rwstat) -> return ()
 
+putNinePkt :: (Integral a) => (a, NineMsg) -> PutM ()
 putNinePkt (tag, body) = do
         let typ = msgTyp body
-            buf = runPut (put typ >> put tag >> putNineMsg body)
+            buf = runPut (put typ >> (putWord16le . fromIntegral) tag >> putNineMsg body)
         putWord32le $ fromIntegral $ L.length buf + 4
         putLazyByteString buf
 

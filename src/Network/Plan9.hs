@@ -10,10 +10,16 @@
 module Network.Plan9 (
     -- Plan9 re-exports
     module Network.Plan9.NineP
+  , module Network.Plan9.Parser
     -- Da Funk
-    NineP
+    --Network.Plan9
 ) where
 
+import Data.Word
+import Network.Plan9.NineP
+import Network.Plan9.Parser
+
+-- | permission bits
 dmdir =            0x80000000 :: Word32
 dmappend =         0x40000000 :: Word32
 dmexcl =           0x20000000 :: Word32

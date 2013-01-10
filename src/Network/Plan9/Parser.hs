@@ -1,14 +1,13 @@
 {-# LANGUAGE FlexibleInstances, TypeSynonymInstances, OverloadedStrings #-}
---module Network.Plan9.Parser (
-module Parser (
+module Network.Plan9.Parser (
                   -- ** buildNineMsg - function that can encode all NineMsg types to a Blaze.Builder
                    buildNinePkt
-
+                  , Sized(..)
                   -- ** parseNineMsg - function to decode all NineMsg types from an input stream
                   , parseNinePkt
 ) where
 
-import Blaze.ByteString.Builder.ByteString (copyByteString, fromByteString, fromLazyByteString)
+import Blaze.ByteString.Builder.ByteString (copyByteString, fromLazyByteString) -- fromByteString
 import Blaze.ByteString.Builder (Builder, toLazyByteString, Write, Builder, fromWrite)
 import Blaze.ByteString.Builder.Char.Utf8 (fromString)
 import Blaze.ByteString.Builder.Word (
@@ -16,7 +15,7 @@ import Blaze.ByteString.Builder.Word (
 	writeWord32le, writeWord64le
 	)
 
-import Data.Text.Encoding (encodeUtf8, decodeUtf8)
+import Data.Text.Encoding (encodeUtf8) --, decodeUtf8) 
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -28,9 +27,8 @@ import qualified Data.Attoparsec as Atto
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
 
-import Network.Server.ScalableServer
---import Network.Plan9.NineP
-import NineP
+--import Network.Server.ScalableServer
+import Network.Plan9.NineP
 
 import Data.Monoid ((<>),mconcat)
 
@@ -60,9 +58,9 @@ instance Buildable Text where
                in fromWord16le (fromIntegral $ S.length bs)
 	          <> copyByteString bs
 instance Buildable Stat where
-    build (Stat typ dev qid mode atime mtime length name uid gid muid) =
+    build (Stat typ dev qid mode atime mtime len name uid gid muid) =
       build (mconcat $ [write typ, write dev, write qid, write mode, write atime, write mtime,
-                        write length])
+                        write len])
             <> (mconcat $ map build [name, uid, gid, muid])
 
 instance (Buildable a) => Buildable [a] where
@@ -81,10 +79,9 @@ instance Sized a => Sized [a] where
 parseNinePkt :: Int -> Parser (S.ByteString)
 parseNinePkt maxSize = (<?> "NinePkt") $ do
   sz <- fromIntegral <$> anyWord32le
-  if sz < 4+1+2 || sz > maxSize then
-    fail $ "Invalid NinePkt size: " ++ (show sz)
-  else
-    Atto.take (sz-4)
+  if sz < 4+1+2 || sz > maxSize
+    then fail $ "Invalid NinePkt size: " ++ (show sz)
+    else Atto.take (sz-4)
 
 writeLen :: [a] -> Write
 writeLen = writeWord16le . fromIntegral . length
@@ -147,13 +144,13 @@ instance Sized Builder where
     size = size . toLazyByteString
 
 instance Sized Stat where
-    size (Stat typ dev qid mode atime mtime length name uid gid muid) =
+    size (Stat typ dev qid mode atime mtime len name uid gid muid) =
       2 + sum [size typ, size dev, size qid, size mode, size atime, size mtime,
-		size length, size name, size uid, size gid, size muid]
+		size len, size name, size uid, size gid, size muid]
 instance Sized Qid where
     size (Qid a b c) = size a + size b + size c
 instance Sized Text where
-    size t = 2 + T.length t
+    size t = 2 + (size . encodeUtf8) t
     
 instance Sized NineMsg where
     size msg = (4 + 1 + 2) + case msg of
