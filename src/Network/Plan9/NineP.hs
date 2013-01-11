@@ -86,11 +86,13 @@ module Network.Plan9.NineP (
                   -- ** NineMsg - An envelope encapsulating the various 9P2000 messages 
                   , NineMsg(..)
                           
-                  -- ** putNineMsg - function that can encode all NineMsg types to a lazy ByteString
-                  , putNineMsg, putNinePkt
+                  -- ** encodeNinePkt - function that can encode all NinePkt types to a lazy ByteString
+                  , encodeNinePkt
+		  , putNinePkt
 
-                  -- ** getNineMsg - function to decode all NineMsg types from a lazy ByteString
-                  , getNineMsg, decodeNinePkt, getNinePkt
+                  -- ** decodeNinePkt - function to decode all NinePkt types from a lazy ByteString
+                  , decodeNinePkt, decodeNinePktC
+		  , getNinePktC
 
                   -- * Example
                   -- $example
@@ -295,9 +297,9 @@ data NineMsg =
     | Tremove { trm_fid :: Word32 }
     | Rremove
     | Tstat { ts_fid :: Word32 }
-    | Rstat { rs_stat :: [Stat] }
+    | Rstat { rs_stat :: Stat }
     | Twstat { tws_fid :: Word32,
-	       tws_stat :: [Stat]
+	       tws_stat :: Stat
     }
     | Rwstat
     deriving (Show, Eq)
@@ -315,15 +317,22 @@ instance Bin MsgTyp where
     get = typName <$> getWord8
     put = putWord8 . fromIntegral . typInt
 
--- | Parse a @ByteString@ containing the @NineMsg@ payload (all except the leading sz.)
---   into a tag and a message body.
-decodeNinePkt :: L.ByteString -> (Int, NineMsg)
-decodeNinePkt = runGet getNinePkt
+-- | Parse a @ByteString@ containing a 9P2000 format message
+--  into a tag and a message body.
+decodeNinePkt :: L.ByteString -> (Word16, NineMsg)
+decodeNinePkt = runGet (getWord32le >> getNinePktC)
 
-getNinePkt :: Get (Int, NineMsg)
-getNinePkt = do
+-- | Parse a @ByteString@ containing a 9P2000 format message (sans the
+--  leading length field) into a tag and a message body.
+decodeNinePktC :: L.ByteString -> (Word16, NineMsg)
+decodeNinePktC = runGet getNinePktC
+
+-- | A @Data.Binary.Get@ parser for 9P2000 format messages, which 
+-- do not include a leading length.  This returns the tag and message body.
+getNinePktC :: Get (Word16, NineMsg)
+getNinePktC = do
     typ <- typName <$> getWord8
-    tag <- fromIntegral <$> getWord16le
+    tag <- getWord16le
     (\ x -> (tag, x)) <$> getNineMsg typ
 
 -- | Takes a fixed size lazy ByteString @sz@, running @g@ on it, and returning the result if all the input is consumed, uses @Prelude.error@ otherwise. (Throws an exception)
@@ -387,7 +396,7 @@ getNineMsg typ = case typ of
 	TRversion -> Rversion <$> get <*> get
 	TTauth -> Tauth <$> get <*> get <*> get
 	TRauth -> Rauth <$> get
-	--TFail  -> Fail "Invalid message type."
+	TFail  -> return $ Rerror "[@yourstack] Bad parse." -- Fail "Invalid message type."
 	TRerror -> Rerror <$> get
 	TTflush -> Tflush <$> get
 	TRflush -> return Rflush
@@ -408,8 +417,8 @@ getNineMsg typ = case typ of
 	TTremove -> Tremove <$> get
 	TRremove -> return Rremove
 	TTstat -> Tstat <$> get
-	TRstat -> Rstat <$> getNestList16
-	TTwstat -> Twstat <$> get <*> getNestList16
+	TRstat -> Rstat <$> get
+	TTwstat -> Twstat <$> get <*> get
 	TRwstat -> return Rwstat
 
 -- | For every lower level NineMsg type, encodes a full wrapper around that type for use with 9P2000 streams
@@ -439,14 +448,20 @@ putNineMsg msg = case msg of
 	(Tremove a) -> put a
 	(Rremove) -> return ()
 	(Tstat a) -> put a
-	(Rstat a) -> putNestList16 a
-	(Twstat a b) -> put a >> putNestList16 b
+	(Rstat a) -> put a
+	(Twstat a b) -> put a >> put b
 	(Rwstat) -> return ()
 
-putNinePkt :: (Integral a) => (a, NineMsg) -> PutM ()
+-- | Encode a tag and message body into a @ByteString@ conforming to 9P2000.
+encodeNinePkt :: (Word16, NineMsg) -> L.ByteString
+encodeNinePkt = runPut . putNinePkt
+
+-- | Create a Put monad for serializing a tag and message body into a
+-- @ByteString@ conforming to 9P2000.
+putNinePkt :: (Word16, NineMsg) -> PutM ()
 putNinePkt (tag, body) = do
         let typ = msgTyp body
-            buf = runPut (put typ >> (putWord16le . fromIntegral) tag >> putNineMsg body)
+            buf = runPut (put typ >> put tag >> putNineMsg body)
         putWord32le $ fromIntegral $ L.length buf + 4
         putLazyByteString buf
 

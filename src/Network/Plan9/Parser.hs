@@ -2,7 +2,7 @@
 module Network.Plan9.Parser (
                   -- ** buildNineMsg - function that can encode all NineMsg types to a Blaze.Builder
                    buildNinePkt
-                  , Sized(..)
+                  , Sized(..), Buildable(..)
                   -- ** parseNineMsg - function to decode all NineMsg types from an input stream
                   , parseNinePkt
 ) where
@@ -34,6 +34,8 @@ import Data.Monoid ((<>),mconcat)
 
 class Writeable a where
     write :: a -> Write
+instance Writeable Write where
+    write = id
 instance Writeable Word8 where
     write = writeWord8
 instance Writeable Word16 where
@@ -53,15 +55,21 @@ instance Buildable Builder where
     build = id
 instance Buildable Write where
     build = fromWrite
+--instance (Writeable a) => Buildable a where
+--    build = fromWrite . write
 instance Buildable Text where
     build xs = let bs = encodeUtf8 xs
                in fromWord16le (fromIntegral $ S.length bs)
 	          <> copyByteString bs
+instance Buildable Qid where
+    build = fromWrite . write
 instance Buildable Stat where
-    build (Stat typ dev qid mode atime mtime len name uid gid muid) =
-      build (mconcat $ [write typ, write dev, write qid, write mode, write atime, write mtime,
-                        write len])
-            <> (mconcat $ map build [name, uid, gid, muid])
+    build stat = sbuild stat
+        where sz = fromIntegral (size stat) :: Word16
+              sbuild (Stat typ dev qid mode atime mtime len name uid gid muid)
+			= build (mconcat $ [write sz, write typ, write dev, write qid,
+					write mode, write atime, write mtime, write len])
+			  <> (mconcat $ map build [name, uid, gid, muid])
 
 instance (Buildable a) => Buildable [a] where
     build = mconcat . (map build)
@@ -76,7 +84,7 @@ instance Sized a => Sized [a] where
   size = sum . map size
 
 --  <|> atEnd
-parseNinePkt :: Int -> Parser (S.ByteString)
+parseNinePkt :: Int  -> Parser (S.ByteString)
 parseNinePkt maxSize = (<?> "NinePkt") $ do
   sz <- fromIntegral <$> anyWord32le
   if sz < 4+1+2 || sz > maxSize
@@ -88,9 +96,9 @@ writeLen = writeWord16le . fromIntegral . length
 write32 :: Int -> Write
 write32 = writeWord32le . fromIntegral
 
-buildNinePkt :: (Int, NineMsg) -> Builder
+buildNinePkt :: (Word16, NineMsg) -> Builder
 buildNinePkt (tag,msg) = let sz = fromIntegral $ size msg
-                             hdr = \ typ -> writeWord32le sz <> write typ <> writeWord16le (fromIntegral tag)
+                             hdr = \ typ -> writeWord32le sz <> write typ <> write tag
    in msgbuilder hdr
    where
       msgbuilder hdr = case msg of
@@ -145,7 +153,7 @@ instance Sized Builder where
 
 instance Sized Stat where
     size (Stat typ dev qid mode atime mtime len name uid gid muid) =
-      2 + sum [size typ, size dev, size qid, size mode, size atime, size mtime,
+      2 + sum [ size typ, size dev, size qid, size mode, size atime, size mtime,
 		size len, size name, size uid, size gid, size muid]
 instance Sized Qid where
     size (Qid a b c) = size a + size b + size c
