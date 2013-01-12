@@ -92,8 +92,8 @@ data OpenFidH = OpenFidH {
 
 -- Top-level function, returning a network IO wire from
 -- a FileSystemH
--- It looks like: (IO) --> sort-by-tag -> Sort-by-(NS/File op) |NS -> send to NSH -> Assemble Tag
---                                        \ |file -> sort-by-fid --> send to FileWire -> Assemble Tag
+-- It looks like: (IO) --> sort-by-tag [ < Sort-by-(NS/File op) |NS -> send to NSH   >]-> Assemble Tag
+--                                       < |file -> sort-by-fid --> send to FileWire >
 --                                  -> Check for Error and send RError if so.
 -- an error thrown at this level indicates an internal server error.
 -- 
@@ -115,6 +115,8 @@ mkServer (FileSystemH exts attach) = muxtag serve
 muxtag :: Wire String m NineMsg NineMsg -> Wire String m NinePkt NinePkt
 muxtag startup = Wire.Trans.Combine.context (\(tag,msg) -> tag) startup'
 	where startup' = second startup
+
+
 
 -- for Client.
 type Strategy :: Wire String m NinePkt NinePkt
