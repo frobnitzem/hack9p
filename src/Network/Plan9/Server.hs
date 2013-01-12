@@ -1,7 +1,7 @@
 -- |
 -- Module:     Network.Plan9.Server
 -- Copyright:  (c) 2013 David M. Rogers
--- License:    GPL3
+-- License:    GPL-3
 -- Maintainer: David M. Rogers <predictivestatmech@gmail.com>
 --
 -- FRP framework for a file-server.
@@ -11,8 +11,9 @@ module Network.Plan9.Server
 
 import Control.Wire.Wire
 import Data.Word
-
+import Data.ByteString.Lazy (ByteString)
 import Network.Plan9.NineP
+import Control.Arrow
 
 data Server = Server {
     ver :: String,
@@ -21,14 +22,14 @@ data Server = Server {
 
 data ServerError m = SError {
     ename :: String,
-    errno :: Word32, -- 9P2000
+--    errno :: Word32, -- 9P2000
     reset :: m()     -- always have an exit strategy to recover the server
 }
--- Report the error, but don't do any monadic action.
+-- | Report the error, but don't do any monadic action.
 sError :: String -> ServerError
 sError err = SError err (return())
 
--- Pre-specify error and monad types
+-- | Pre-specify error and monad types
 -- all the clutter is because we parameterize over m,
 -- the monad type, so users can do IO / state
 -- violence in there.
@@ -53,8 +54,8 @@ data AttReq = AttReq {
 data CreateReq = CreateReq {
   name :: String,
   perm :: Word32,
-  mode :: Mode,
-  exts :: String
+  mode :: Word8
+--  exts :: String
 }
 data OpenResp = OpenResp {
   qid :: Qid,
@@ -74,18 +75,14 @@ data NSH m = NSH {
 data FidH = FidH {
     stat  :: (SrvWire m) () Stat,
     wstat :: (SrvWire m) Stat (),
-    open  :: (SrvWire m) Mode (OpenResp, OpenFidH),
+    open  :: (SrvWire m) Word8 (OpenResp, OpenFidH),
     clunk :: (SrvWire m) () ()
 }
 
-type Mode = Word8
-type Offset = Offset Word64
-type Count = Count Word32
-
 -- TODO: check what we can do to make these interruptable when flush comes along.
 data OpenFidH = OpenFidH {
-    read :: (SrvWire m) (Offset,Count) (Count,ByteString),
-    write :: (SrvWire m) (Offset,Count,ByteString) Count
+    read :: (SrvWire m) (Word64,Word32) (Word32,ByteString),
+    write :: (SrvWire m) (Word64,Word32,ByteString) Word32
 }
 
 {- The main body of the server specifies the hard and
@@ -113,9 +110,17 @@ mkServer (FileSystemH exts attach) = muxtag serve
                name exts  = "9P2000."++exts
        serve _ = sError "Unrecognized cmd."
 
-       muxtag :: Wire String m NineMsg NineMsg -> Wire String m NinePkt NinePkt
-       muxtag w = lift do
-           
+-- muxtag remembers the tagged requests that have come through
+-- and ships them to the right place.
+muxtag :: Wire String m NineMsg NineMsg -> Wire String m NinePkt NinePkt
+muxtag startup = Wire.Trans.Combine.context (\(tag,msg) -> tag) startup'
+	where startup' = second startup
+
+-- for Client.
+type Strategy :: Wire String m NinePkt NinePkt
+clientWire :: (Monad m) => Wire String m Strategy NinePkt
+clientWire = clientUpdState Set.empty
+	where clientUpdState st = updateStrategies . (newSt &&& (runStrategies . fifo))
 
 {-
 mkPure :: (Time -> a -> (Either e b, Wire e m a b)) -> Wire e m a b

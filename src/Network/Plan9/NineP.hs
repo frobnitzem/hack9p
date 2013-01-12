@@ -152,6 +152,8 @@ instance Bin Text where
              in do putWord16le (fromIntegral $ S.length bs)
 	           putByteString bs
 
+-------------- Declare the data types !!! ------------------
+
 -- | A Plan 9 Qid type.  See http://9p.cat-v.org for more information
 data Qid = Qid {
     qid_typ :: Word8, -- qid.type[1] the type of the file (directory, etc.),
@@ -236,7 +238,6 @@ instance Bin Stat where
         putLazyByteString buf
       where p  = put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h >> put i >> put j >> put k
 
-
 -- | A variable message type that encapsulates the valid kinds of messages in a 9P2000 payload
 -- see http://man.cat-v.org/plan_9/5/intro
 -- and http://ericvh.github.com/9p-rfc/rfc9p2000.u.html
@@ -267,7 +268,7 @@ data NineMsg =
               tw_newfid :: Word32,
 	      tw_wnames :: [Text]
     }
-    | Rwalk { rw_wqid :: [Qid] }
+    | Rwalk { rwr_wqid :: [Qid] }
     | Topen { to_fid :: Word32,
 	      to_mode :: Word8
     }
