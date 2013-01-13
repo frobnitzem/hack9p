@@ -6,11 +6,14 @@ import Data.Binary.Get (runGet, skip, getRemainingLazyByteString)
 import Data.Text
 import Data.Word
 import Control.Monad
+import Data.Monoid (Monoid(..))
 import Test.QuickCheck
 import Text.Printf
 import Data.Attoparsec (parse, IResult(..))
 
 import Network.Plan9
+import Control.Wire (stepWire, Time, Wire)
+import qualified Control.Monad.State as SM
 import Blaze.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
@@ -119,6 +122,53 @@ prop_parse_gets_sz msg = let pkt = (toLazyByteString . buildNinePkt) msg
 			 in case p of
 				Done t pktC'   -> pktC == pktC' && size t == 0
 				_  -> False
+
+-- How to test a session?
+-- 1. It's like programming a computer to play a game,
+--    and observe the rules.
+-- 2. We describe a stateful system with a chat-script,
+--    like a Turing challenge from machine to machine.
+-- 3. Our chat-script is an arrow, taking a response
+--    and producing a request. -- exactly the same format
+--    as the server.
+-- 4. The difference is that our arrow can end the challenge
+--    at any time with a Nothing, denoting no detected
+--    abnormality, or a Just (to say...), denoting a failed
+--    expectation.
+
+-- Carry out a conversation, kicked off with an initial send
+-- from the client to the server, run server, run client, etc.
+-- It ends when the client (or server) inhibits
+-- Either 'stepwire' can modify the state to, e.g. journal
+--   the transactions.
+chat :: a -- hello
+     -> Wire srverr (SM.State s) a b -- server
+     -> Wire clierr (SM.State s) b a -- client
+     -> SM.State s (Either srverr clierr)
+chat hello srv' cli' = do
+	(sresp, srv) <- stepWire srv' 1 hello
+	case sresp of
+	    Right resp -> do
+		(cresp, cli) <- stepWire cli' 1 resp
+		case cresp of
+			Right ok -> chat ok srv cli
+			Left cerr -> return $ Right cerr
+	    Left serr -> return $ Left serr
+
+-- | This one also requires the client to have a maybe
+-- error to represent whether it just got tired.
+showChat :: (Show s, Monoid s, Show srverr, Show clierr)
+        => a -- hello
+        -> Wire srverr (SM.State s) a b -- server
+        -> Wire (Maybe clierr) (SM.State s) b a -- client
+        -> String
+showChat a srv cli =
+	let (err, s) = SM.runState (chat a srv cli) mempty
+	    res = case err of
+		Left err -> "Server Error: " ++ show err
+		Right merr -> maybe "Success!"
+				    (("Client Error: " ++) . show) merr
+	in show s ++ "\n" ++ res ++ "\n"
 
 {-
 data Blech = Foo Int | Bar String Blech
