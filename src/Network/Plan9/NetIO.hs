@@ -1,20 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import qualified Data.Attoparsec as Atto
-import qualified Data.ByteString.Char8 as S
+import qualified Data.ByteString as S
 
 import Control.Monad (void, forever)
 import Control.Concurrent (forkIO, threadDelay)
 
-handler :: NinePkt -> IO Builder
-handler req = return $ handle req
+import Network.Plan9.NineP
 
-handle :: NinePkt -> Builder
-handle (Request "PING") = do
-    copyByteString "PONG\r\n"
+handler :: S.ByteString -> IO Builder
+handler s = let pkt = decodeNinePktC s
+	    (mr, w) = stepWire wire 0 
 
 handle (Request _) = do
     copyByteString "ERROR\r\n"
+
+parseRequest :: Parser (S.ByteString)
+parseRequest = parseNinePkt 85532
 
 main = testServer
 

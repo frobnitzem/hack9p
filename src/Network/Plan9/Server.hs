@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module:     Network.Plan9.Server
 -- Copyright:  (c) 2013 David M. Rogers
@@ -9,11 +10,19 @@
 module Network.Plan9.Server
     where
 
-import Control.Wire.Wire
+import Control.Wire
 import Data.Word
 import Data.ByteString.Lazy (ByteString)
-import Network.Plan9.NineP
 import Control.Arrow
+
+import qualified Data.Text as T
+
+import Network.Plan9.Consts
+import Network.Plan9.Parser
+import Network.Plan9.Builder
+import Network.Plan9.Wires
+
+import Prelude hiding (id,(.))
 
 data Server = Server {
     ver :: String,
@@ -23,17 +32,17 @@ data Server = Server {
 data ServerError m = SError {
     ename :: String,
 --    errno :: Word32, -- 9P2000
-    reset :: m()     -- always have an exit strategy to recover the server
+    reset :: m ()     -- always have an exit strategy to recover the server
 }
 -- | Report the error, but don't do any monadic action.
-sError :: String -> ServerError
+sError :: (Monad m) => String -> ServerError m
 sError err = SError err (return())
 
 -- | Pre-specify error and monad types
 -- all the clutter is because we parameterize over m,
 -- the monad type, so users can do IO / state
 -- violence in there.
-newtype SrvWire m = Wire (ServerError m) m
+type SrvWire m = Wire (ServerError m) m
 
 data AttReq = AttReq {
   fid   :: Word32,
@@ -72,15 +81,15 @@ data NSH m = NSH {
     remove :: (SrvWire m) () (),
     detach :: (SrvWire m) () () -- connection shutdown function, called after all clunks.
 }
-data FidH = FidH {
+data FidH m = FidH {
     stat  :: (SrvWire m) () Stat,
     wstat :: (SrvWire m) Stat (),
-    open  :: (SrvWire m) Word8 (OpenResp, OpenFidH),
+    open  :: (SrvWire m) Word8 (OpenResp, OpenFidH m),
     clunk :: (SrvWire m) () ()
 }
 
 -- TODO: check what we can do to make these interruptable when flush comes along.
-data OpenFidH = OpenFidH {
+data OpenFidH m = OpenFidH {
     read :: (SrvWire m) (Word64,Word32) (Word32,ByteString),
     write :: (SrvWire m) (Word64,Word32,ByteString) Word32
 }
@@ -91,7 +100,7 @@ data OpenFidH = OpenFidH {
  -}
 
 -- Top-level function, returning a network IO wire from
--- a FileSystemH
+-- a FileSysH
 -- It looks like: (IO) --> sort-by-tag [ < Sort-by-(NS/File op) |NS -> send to NSH   >]-> Assemble Tag
 --                                       < |file -> sort-by-fid --> send to FileWire >
 --                                  -> Check for Error and send RError if so.
@@ -99,40 +108,18 @@ data OpenFidH = OpenFidH {
 -- 
 -- This wire keeps an internal state listing all `attached' NameSpace handlers (NSH-s)
 -- and tags routed to them.
-type ServerWire = Wire String m NinePkt NinePkt
-mkServer :: (Monad m) => FileSystemH m -> ServerWire
-mkServer (FileSystemH exts attach) = muxtag serve
+type ServerWire m = Wire String m NinePkt [(Word16, Maybe NineMsg)]
+mkServer :: (Monad m) => FileSysH m -> ServerWire m
+mkServer (FileSysH exts attach) = fork (pure $ arr serve)
     where
-       serve :: Wire String m NineMsg NineMsg
-       serve (TVersion sz ver) = lift (Rversion (name exts))
-           where
-               name [] = "9P2000"
-               name exts  = "9P2000."++exts
-       serve _ = sError "Unrecognized cmd."
-
--- muxtag remembers the tagged requests that have come through
--- and ships them to the right place.
-muxtag :: Wire String m NineMsg NineMsg -> Wire String m NinePkt NinePkt
-muxtag startup = Wire.Trans.Combine.context (\(tag,msg) -> tag) startup'
-	where startup' = second startup
-
-
-
--- for Client.
-type Strategy :: Wire String m NinePkt NinePkt
-clientWire :: (Monad m) => Wire String m Strategy NinePkt
-clientWire = clientUpdState Set.empty
-	where clientUpdState st = updateStrategies . (newSt &&& (runStrategies . fifo))
+       serve (Tversion sz "9P2000") = inhibit . Just $ Rversion (maxsz sz) "9P2000"
+       serve (Tversion sz ver) = case T.take 7 ver of
+		"9P2000." -> inhibit . Just $ Rversion (maxsz sz) "9P2000"
+		_	  -> inhibit . Just $ Rerror "Unsupported Protocol."
+       serve _ = inhibit . Just $ Rerror "Unrecognized cmd."
+       maxsz = max 65536
 
 {-
-mkPure :: (Time -> a -> (Either e b, Wire e m a b)) -> Wire e m a b
-
-mkState ::
-    s
-    -> (Time -> (a, s) -> (Either e b, s))
-    -> Wire e m a b
--}
-
 mkNSH :: (Monad m) => NineMsg -> NineMsg
 
 ---------------- The following routines work on individual fids -------------
@@ -142,4 +129,4 @@ type FileWire m :: (Monad m) => (SrvWire m) FileReq NineMsg
 mkFile :: (Monad m) => FileWire -> FileWire
 
 mkOpenFile :: (Monad m) => FileWire -> FileWire
-
+-}

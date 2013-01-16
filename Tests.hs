@@ -1,9 +1,9 @@
-{-# Language ExistentialQuantification #-}
+{-# Language ExistentialQuantification, OverloadedStrings #-}
 import Data.Char
 import Data.List
 import Data.Binary.Put (runPut, putWord32le, putLazyByteString)
 import Data.Binary.Get (runGet, skip, getRemainingLazyByteString)
-import Data.Text
+import Data.Text (pack, Text)
 import Data.Word
 import Control.Monad
 import Data.Monoid (Monoid(..))
@@ -12,13 +12,16 @@ import Text.Printf
 import Data.Attoparsec (parse, IResult(..))
 
 import Network.Plan9
-import Control.Wire (stepWire, Time, Wire)
+import Control.Wire (stepWire, Time, Wire, mkGen)
+import Control.Wire.Wire (never)
 import qualified Control.Monad.State as SM
 import Blaze.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
 
-main  = mapM_ (\(s,a) -> printf "%-25s: " s >> a) tests
+main = do
+	mapM_ (\(s,a) -> putStr (s ++ ": ") >> a) tests
+	conv
 
 --deepCheck p = check (defaultConfig { configMaxTest = 10000}) p
 
@@ -157,10 +160,10 @@ chat hello srv' cli' = do
 
 -- | This one also requires the client to have a maybe
 -- error to represent whether it just got tired.
-showChat :: (Show s, Monoid s, Show srverr, Show clierr)
+showChat :: (Show srverr, Show clierr)
         => a -- hello
-        -> Wire srverr (SM.State s) a b -- server
-        -> Wire (Maybe clierr) (SM.State s) b a -- client
+        -> Wire srverr (SM.State String) a b -- server
+        -> Wire (Maybe clierr) (SM.State String) b a -- client
         -> String
 showChat a srv cli =
 	let (err, s) = SM.runState (chat a srv cli) mempty
@@ -168,7 +171,41 @@ showChat a srv cli =
 		Left err -> "Server Error: " ++ show err
 		Right merr -> maybe "Success!"
 				    (("Client Error: " ++) . show) merr
-	in show s ++ "\n" ++ res ++ "\n"
+	in s ++ "\n" ++ res ++ "\n"
+
+-- | Compilation instructions for a messaging dsl.
+chatScript :: (Monad m)
+	   => [NineMsg -> m (Either String NineMsg)]
+	   -> Wire (Maybe String) m NineMsg NineMsg
+chatScript = foldr chat' done
+	where	done = never
+		chat' act w = mkGen $
+			\ _ msg -> act msg >>= \resp -> return (ljust resp, w)
+		ljust (Left a) = Left (Just a)
+		ljust (Right a) = Right a
+
+cli1 :: Wire (Maybe String) (SM.State String) NineMsg NineMsg
+cli1 = chatScript $ [
+	respVersion
+	]
+    where respVersion s@(Rversion msize vers) = do
+		(journal $ "Client Recieved: \n"++show s) >> (return $ Right $ Rerror "sorry")
+	  respVersion s = return $ Left ("Expected version, received: " ++ show s)
+	  journal s = SM.get >>= \s' -> SM.put (s'++('\n':s))
+
+srv1 :: Wire (Maybe String) (SM.State String) NineMsg NineMsg
+srv1 = chatScript $ [
+	respVersion
+	]
+    where respVersion s@(Tversion msize vers) = do
+		(journal $ "Server Recieved: \n"++show s) >> (return $ Right $ Rversion msize vers)
+	  respVersion s = return $ Left ("Expected version, received: " ++ show s)
+	  journal s = SM.get >>= \s' -> SM.put (s'++('\n':s))
+
+conv = do
+	let hello = Tversion 1122 "9P2000"
+	    s = showChat hello srv1 cli1
+	putStr (s++"\n")
 
 {-
 data Blech = Foo Int | Bar String Blech

@@ -1,89 +1,171 @@
-{-# LANGUAGE FlexibleInstances, TypeSynonymInstances, OverloadedStrings #-}
-module Network.Plan9.Parser (
-                  -- ** buildNineMsg - function that can encode all NineMsg types to a Blaze.Builder
-                   buildNinePkt
-                  , Sized(..), Buildable(..)
-                  -- ** parseNineMsg - function to decode all NineMsg types from an input stream
-                  , parseNinePkt
-) where
+{-# LANGUAGE TypeSynonymInstances, FlexibleInstances, OverloadedStrings #-}
+-----------------------------------------------------------------------------
+-- |
+-- Module      : Network.Plan9.Parser
+-- Copyright   : David M. Rogers and Tim Newsham
+-- License     : GPL3 (see below)
+-- 
+-- Maintainer  : David M. Rogers <predictivestatmech@gmail.com>
+-- Stability   : experimental
+-- Portability : Only tested on GHC 7.4.1, uses TypeSynonymInstances
+--
+-- Module providing Binary serialization of 9P messages to and from lazy 
+-- ByteStrings.
+-- 
+-- 
+-- 9P2000 messages are sent in little endian byte order rather than network byte order 
+-- (big endian)
+--
+-----------------------------------------------------------------------------
+--
+{-
+ - Copyright (c) 2013  David M. Rogers <predictivestatmech@gmail.com>
+ -  
+ -  This file is part of hack9p.
+ -
+ -  hack9p is free software: you can redistribute it and/or modify
+ -  it under the terms of the GNU General Public License as published by
+ -  the Free Software Foundation, either version 3 of the License, or
+ -  (at your option) any later version.
+ -
+ -  hack9p is distributed in the hope that it will be useful,
+ -  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ -  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ -  GNU General Public License for more details.
+ -
+ -  You should have received a copy of the GNU General Public License
+ -  along with hack9p.  If not, see <http://www.gnu.org/licenses/>.
+ -
+ - This file incorporates work covered by the following copyright and  
+ - permission notice:  
+ -  
+ -    Copyright (c) 2010, Tim Newsham and David Leimbach
+ -    All rights reserved.
+ -    
+ -    Redistribution and use in source and binary forms, with or without
+ -    modification, are permitted provided that the following conditions are met:
+ -    
+ -    1. Redistributions of source code must retain the above copyright notice,
+ -    this list of conditions and the following disclaimer.
+ -    
+ -    2. Redistributions in binary form must reproduce the above copyright
+ -    notice, this list of conditions and the following disclaimer in the
+ -    documentation and/or other materials provided with the distribution.
+ -    
+ -    3. Neither the names of the authors nor the names of other project
+ -    contributors may be used to endorse or promote products derived from
+ -    this software without specific prior written permission.
+ -
+ -    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ -    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+ -    TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ -    PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ -    CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ -    EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ -    PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ -    PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ -    LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ -    NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ -    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ -}
 
-import Blaze.ByteString.Builder.ByteString (copyByteString, fromLazyByteString) -- fromByteString
-import Blaze.ByteString.Builder (Builder, toLazyByteString, Write, Builder, fromWrite)
-import Blaze.ByteString.Builder.Char.Utf8 (fromString)
-import Blaze.ByteString.Builder.Word (
-	fromWord16le, writeWord8, writeWord16le,
-	writeWord32le, writeWord64le
-	)
+module Network.Plan9.Parser ( 
+                -- * Bin - a little endian encode/decode class for Bin values
+                 Bin(..)
 
-import Data.Text.Encoding (encodeUtf8) --, decodeUtf8) 
-import Data.Text (Text)
-import qualified Data.Text as T
+                -- ** encodeNinePkt - function that can encode all NinePkt types to a lazy ByteString
+                --    Note: The builders in 
+                , encodeNinePkt
+		, putNinePkt
 
+                -- * parseNineMsg - Attoparsec function to parse the 4-byte message size
+                -- and return the packet as a bytestring.
+                , parseNinePkt
+
+                -- ** decodeNinePkt - function to decode all NinePkt types from a lazy ByteString
+                -- The 'C' versions expect the leading 4-byte message size to be gone
+                , decodeNinePkt, decodeNinePktC
+		, getNinePktC
+		, typInt
+		, typName
+		, msgTyp
+                -- * Example
+                -- $example
+                ) where
+
+import Control.Applicative
+import Control.Monad
+import Data.Binary.Get
+import Data.Binary.Put
 import Data.Word
-import Control.Applicative ((<$>))
-import Data.Attoparsec ((<?>), Parser)
-import Data.Attoparsec.Binary (anyWord32le)
-import qualified Data.Attoparsec as Atto
+
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
 
---import Network.Server.ScalableServer
-import Network.Plan9.NineP
+import Data.Attoparsec ((<?>), Parser)
+import Data.Attoparsec.Binary (anyWord32le)
+import qualified Data.Attoparsec as Atto
 
-import Data.Monoid ((<>),mconcat)
+import Data.Text(Text)
+import Data.Text.Encoding(encodeUtf8, decodeUtf8)
 
-class Writeable a where
-    write :: a -> Write
-instance Writeable Write where
-    write = id
-instance Writeable Word8 where
-    write = writeWord8
-instance Writeable Word16 where
-    write = writeWord16le
-instance Writeable Word32 where
-    write = writeWord32le
-instance Writeable Word64 where
-    write = writeWord64le
-instance Writeable Qid where
-    write (Qid typ vers path) = write typ <> write vers <> write path
-instance Writeable MsgTyp where
-    write = writeWord8 . fromIntegral . typInt
+import Network.Plan9.Consts
 
-class Buildable a where
-    build :: a -> Builder
-instance Buildable Builder where
-    build = id
-instance Buildable Write where
-    build = fromWrite
---instance (Writeable a) => Buildable a where
---    build = fromWrite . write
-instance Buildable Text where
-    build xs = let bs = encodeUtf8 xs
-               in fromWord16le (fromIntegral $ S.length bs)
-	          <> copyByteString bs
-instance Buildable Qid where
-    build = fromWrite . write
-instance Buildable Stat where
-    build stat = sbuild stat
-        where sz = fromIntegral (size stat) :: Word16
-              sbuild (Stat typ dev qid mode atime mtime len name uid gid muid)
-			= build (mconcat $ [write sz, write typ, write dev, write qid,
-					write mode, write atime, write mtime, write len])
-			  <> (mconcat $ map build [name, uid, gid, muid])
+-- Little-endian!
+class Bin a where
+    get :: Get a
+    put :: a -> Put
 
-instance (Buildable a) => Buildable [a] where
-    build = mconcat . (map build)
+instance Bin Word8 where
+    get = getWord8
+    put = putWord8
 
--- 9P2000 Message serialization size.
-class Sized a where
-  size :: a -> Int
+instance Bin Word16 where
+    get = getWord16le
+    put = putWord16le
 
-instance (Sized a, Sized b) => Sized (a, b) where
-  size (left, right) = size left + size right
-instance Sized a => Sized [a] where
-  size = sum . map size
+instance Bin Word32 where
+    get = getWord32le
+    put = putWord32le
 
---  <|> atEnd
+instance Bin Word64 where
+    get = getWord64le
+    put = putWord64le
+
+instance Bin Text where
+    get = getWord16le >>= \ sz -> decodeUtf8 <$> getBytes (fromIntegral sz)
+    put xs = let bs = encodeUtf8 xs
+             in do putWord16le (fromIntegral $ S.length bs)
+	           putByteString bs
+
+-- Instance of Bin for Qid.
+instance Bin Qid where
+    get = Qid <$> get <*> get <*> get
+    put (Qid t v p) = put t >> put v >> put p
+
+instance Bin Stat where
+    get = do
+        n <- getWord16le
+        getNest n g
+      where g = Stat <$> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get
+    put (Stat a b c d e f g h i j k) = do
+        let buf = runPut p
+        putWord16le $ fromIntegral $ L.length buf
+        putLazyByteString buf
+      where p  = put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h >> put i >> put j >> put k
+
+instance Bin MsgTyp where
+    get = typName <$> getWord8
+    put = putWord8 . fromIntegral . typInt
+
+-- | Parse a @ByteString@ containing a 9P2000 format message
+--  into a tag and a message body.
+decodeNinePkt :: L.ByteString -> (Word16, NineMsg)
+decodeNinePkt = runGet (getWord32le >> getNinePktC)
+
+-- | A Parser that reads the 4-byte length and returns
+-- a @ByteString@ with the rest of the message.
+-- Suitable for decoding with @decodeNinePktC@.
 parseNinePkt :: Int  -> Parser (S.ByteString)
 parseNinePkt maxSize = (<?> "NinePkt") $ do
   sz <- fromIntegral <$> anyWord32le
@@ -91,115 +173,238 @@ parseNinePkt maxSize = (<?> "NinePkt") $ do
     then fail $ "Invalid NinePkt size: " ++ (show sz)
     else Atto.take (sz-4)
 
-writeLen :: [a] -> Write
-writeLen = writeWord16le . fromIntegral . length
-write32 :: Int -> Write
-write32 = writeWord32le . fromIntegral
+-- | Parse a @ByteString@ containing a 9P2000 format message (sans the
+--  leading length field) into a tag and a message body.
+decodeNinePktC :: L.ByteString -> (Word16, NineMsg)
+decodeNinePktC = runGet getNinePktC
 
-buildNinePkt :: (Word16, NineMsg) -> Builder
-buildNinePkt (tag,msg) = let sz = fromIntegral $ size msg
-                             hdr = \ typ -> writeWord32le sz <> write typ <> write tag
-   in msgbuilder hdr
-   where
-      msgbuilder hdr = case msg of
-	Tversion a b -> build (hdr TTversion <> write a) <> build b
-	Rversion a b -> build (hdr TRversion <> write a) <> build b
-	Tauth a b c -> build (hdr TTauth <> write a) <> build b <> build c
-	Rauth a     -> build (hdr TRauth <> write a)
-	Rerror a -> build (hdr TRerror) <> build a
-	Tflush a -> build $ hdr TTflush <> write a
-	Rflush   -> build $ hdr TRflush
-	Tattach a b c d -> build (hdr TTattach <> write a <> write b) <> build c <> build d
-	Rattach a       -> build $ hdr TRattach <> write a
-	Twalk a b c -> build (hdr TTwalk <> write a <> write b <> writeLen c)
-			<> mconcat (map build c)
-	Rwalk a     -> build (hdr TRwalk <> writeLen a)
-			<> mconcat (map (build . write) a)
-	Topen a b -> build $ hdr TTopen <> write a <> write b
-	Ropen a b -> build $ hdr TRopen <> write a <> write b
-	Tcreate a b c d -> build (hdr TTcreate <> write a) <> build b <> build (write c <> write d)
-	Rcreate a b     -> build $ hdr TRcreate <> write a <> write b
-	Tread a b c -> build $ hdr TTread <> write a <> write b <> write c
-	Rread a     -> build (hdr TRread <> write32 (size a)) <> fromLazyByteString a
-	Twrite a b c -> build (hdr TTwrite <> write a <> write b <> write32 (size c)) <> fromLazyByteString c
-	Rwrite a     -> build $ hdr TRwrite <> write a
-	Tclunk a -> build $ hdr TTclunk <> write a
-	Rclunk   -> build $ hdr TRclunk
-	Tremove a -> build $ hdr TTremove <> write a
-	Rremove   -> build $ hdr TRremove
-	Tstat fid  -> build $ hdr TTstat <> write fid
-	Rstat stat -> build (hdr TRstat) <> build stat
-	Twstat fid stat -> build (hdr TTwstat <> write fid) <> build stat
-	Rwstat          -> build $ hdr TRwstat
+-- | A @Data.Binary.Get@ parser for 9P2000 format messages, which 
+-- do not include a leading length.  This returns the tag and message body.
+getNinePktC :: Get (Word16, NineMsg)
+getNinePktC = do
+    typ <- typName <$> getWord8
+    tag <- getWord16le
+    (\ x -> (tag, x)) <$> getNineMsg typ
 
--- | Some drab utility functions.
+-- | Takes a fixed size lazy ByteString @sz@, running @g@ on it, and returning the result if all the input is consumed, uses @Prelude.error@ otherwise. (Throws an exception)
+getNest :: Integral n => n -> Get a -> Get a
+getNest sz g = do
+    b <- getLazyByteString (fromIntegral sz)
+    return $ flip runGet b $ do
+        x <- g
+        e <- isEmpty
+        if e
+          then return x
+          else do
+              n <- remaining
+              error $ show n ++ " extra bytes in nested structure"
 
-instance Sized Word8 where
-    size _ = 1
-instance Sized Word16 where
-    size _ = 2
-instance Sized Word32 where
-    size _ = 4
-instance Sized Word64 where
-    size _ = 8
-instance Sized String where
-    size = (+2) . size . fromString
-instance Sized S.ByteString where
-    size = S.length
-instance Sized L.ByteString where
-    size = fromIntegral . L.length
-instance Sized Builder where
-    size = size . toLazyByteString
+-- | A monadic action in Get that returns all parseable entries as a list, returning [] if none exist
+getListAll :: (Bin a) => Get [a]
+getListAll = do
+    e <- isEmpty 
+    if e 
+      then return [] 
+      else (:) <$> get <*> getListAll
 
-instance Sized Stat where
-    size (Stat typ dev qid mode atime mtime len name uid gid muid) =
-      2 + sum [ size typ, size dev, size qid, size mode, size atime, size mtime,
-		size len, size name, size uid, size gid, size muid]
-instance Sized Qid where
-    size (Qid a b c) = size a + size b + size c
-instance Sized Text where
-    size t = 2 + (size . encodeUtf8) t
-    
-instance Sized NineMsg where
-    size msg = (4 + 1 + 2) + case msg of
-	(Tversion msize ver) -> 4 + size ver
-        (Rversion msize ver) -> 4 + size ver
+-- | A monadic action in Put that maps all encodable items into the Put monad for serialization
+putListAll :: (Bin a) => [a] -> Put
+putListAll = mapM_ put
 
-        (Tauth afid uname aname) -> 4 + size uname + size aname
-        (Rauth qid) -> size emptyQid
+-- | Like 'getNest' but is preceded by a little endian 16bit word.  Useful for retrieving 16bit payload lengths from 9P2000 messages that support it.
+getNestList16 :: (Bin a) => Get [a]
+getNestList16 = do
+    n <- getWord16le
+    getNest n getListAll
 
-        (Rerror ename) -> size ename
+-- | Runs 'putListAll' over @xs@ followed by computing the 16bit (little endian) length of the list, and prepending it to the final payload.  Useful for automatically computing lengths for 9P2000 messages that require it
+putNestList16 :: Bin a => [a] -> Put
+putNestList16 xs = do
+    let buf = runPut (putListAll xs)
+    putWord16le $ fromIntegral $ L.length buf
+    putLazyByteString buf
 
-        (Tflush oldtag) -> 2
-        (Rflush)        -> 0
+-- | Gets a 16bit value from the stream, then executes @Data.Binary.Get.get@ that many times to produce a list of parsed values.
+getList16 :: Bin a => Get [a]
+getList16 = getWord16le >>= \n -> replicateM (fromIntegral n) get
 
-        (Tattach fid afid uname aname) -> 4 + 4 + size uname + size aname
-        (Rattach qid) -> size emptyQid
+-- | Puts @xs@ into the Put stream prepended by its length.
+putList16 :: Bin a => [a] -> Put
+putList16 xs = putWord16le (fromIntegral $ length xs) >> mapM_ put xs
 
-        (Twalk fid newfid wname) -> 4 + 4 + 2 + size wname
-        (Rwalk wqid) -> 2 + (length wqid)*(size emptyQid)
+-- | Gets a 32bit little endian legnth from the stream, then gets a lazy ByteString of that size from the stream, returning only the ByteString
+getBytes32 :: Get L.ByteString
+getBytes32 = getWord32le >>= getLazyByteString . fromIntegral
 
-        (Topen fid mode) -> 4 + 1
-        (Ropen qid iounit) -> size emptyQid + 4
+-- | Takes length of @xs@ and then prepends that to the lazy ByteString it places in the Stream
+putBytes32 :: L.ByteString -> Put
+putBytes32 xs = putWord32le (fromIntegral $ L.length xs) >> putLazyByteString xs
 
-        (Tcreate fid name perm mode) -> 4 + size name + 4 + 1
-        (Rcreate qid iounit) -> size emptyQid + 4
+-- | For a given message type, produces a Get parser to decode that type of payload from the 9P2000 stream
+getNineMsg :: MsgTyp -> Get NineMsg
+getNineMsg typ = case typ of
+	TTversion -> Tversion <$> get <*> get
+	TRversion -> Rversion <$> get <*> get
+	TTauth -> Tauth <$> get <*> get <*> get
+	TRauth -> Rauth <$> get
+	TFail  -> return $ Rerror "[@yourstack] Bad parse." -- Fail "Invalid message type."
+	TRerror -> Rerror <$> get
+	TTflush -> Tflush <$> get
+	TRflush -> return Rflush
+	TTattach -> Tattach <$> get <*> get <*> get <*> get
+	TRattach -> Rattach <$> get
+	TTwalk -> Twalk <$> get <*> get <*> getList16
+	TRwalk -> Rwalk <$> getList16
+	TTopen -> Topen <$> get <*> get
+	TRopen -> Ropen <$> get <*> get
+	TTcreate -> Tcreate <$> get <*> get <*> get <*> get
+	TRcreate -> Rcreate <$> get <*> get
+	TTread -> Tread <$> get <*> get <*> get
+	TRread -> Rread <$> getBytes32
+	TTwrite -> Twrite <$> get <*> get <*> getBytes32
+	TRwrite -> Rwrite <$> get
+	TTclunk -> Tclunk <$> get
+	TRclunk -> return Rclunk
+	TTremove -> Tremove <$> get
+	TRremove -> return Rremove
+	TTstat -> Tstat <$> get
+	TRstat -> Rstat <$> get
+	TTwstat -> Twstat <$> get <*> get
+	TRwstat -> return Rwstat
 
-        (Tread fid offset count) -> 4 + 8 + 4
-        (Rread dat) -> 4 + size dat
+-- | For every lower level NineMsg type, encodes a full wrapper around that type for use with 9P2000 streams
+putNineMsg :: NineMsg -> Put
+putNineMsg msg = case msg of
+	(Tversion a b) -> put a >> put b
+	(Rversion a b) -> put a >> put b
+	(Tauth a b c) -> put a >> put b >> put c
+	(Rauth a) -> put a
+	(Rerror a) -> put a
+	(Tflush a) -> put a
+	(Rflush) -> return ()
+	(Tattach a b c d) -> put a >> put b >> put c >> put d
+	(Rattach a) -> put a
+	(Twalk a b c) -> put a >> put b >> putList16 c
+	(Rwalk a) -> putList16 a
+	(Topen a b) -> put a >> put b
+	(Ropen a b) -> put a >> put b
+	(Tcreate a b c d) -> put a >> put b >> put c >> put d
+	(Rcreate a b) -> put a >> put b
+	(Tread a b c) -> put a >> put b >> put c
+	(Rread a) -> putBytes32 a
+	(Twrite a b c) -> put a >> put b >> putBytes32 c
+	(Rwrite a) -> put a
+	(Tclunk a) -> put a
+	(Rclunk) -> return ()
+	(Tremove a) -> put a
+	(Rremove) -> return ()
+	(Tstat a) -> put a
+	(Rstat a) -> put a
+	(Twstat a b) -> put a >> put b
+	(Rwstat) -> return ()
 
-        (Twrite fid offset dat) -> 4 + 8 + 4 + size dat
-        (Rwrite count) -> 4
+-- | Encode a tag and message body into a @ByteString@ conforming to 9P2000.
+encodeNinePkt :: (Word16, NineMsg) -> L.ByteString
+encodeNinePkt = runPut . putNinePkt
 
-        (Tclunk fid) -> 4
-        (Rclunk) -> 0
+-- | Create a Put monad for serializing a tag and message body into a
+-- @ByteString@ conforming to 9P2000.
+putNinePkt :: (Word16, NineMsg) -> PutM ()
+putNinePkt (tag, body) = do
+        let typ = msgTyp body
+            buf = runPut (put typ >> put tag >> putNineMsg body)
+        putWord32le $ fromIntegral $ L.length buf + 4
+        putLazyByteString buf
 
-        (Tremove fid) -> 4
-        (Rremove) -> 0
+typName :: Word8 -> MsgTyp
+typName n = if n >= 100 && n < 128 && n /= 106 -- 106 == Terror (Fail)
+                    then toEnum $ fromEnum (n-100)
+                    else TFail
+typInt :: MsgTyp -> Int
+typInt = (+ 100) . fromEnum
 
-        (Tstat fid) -> 4
-        (Rstat stat) -> size stat
+-- | Converts NineMsg types to Tag values
+msgTyp :: NineMsg -> MsgTyp
+msgTyp msg = case msg of
+	(Tversion _ _) -> TTversion
+	(Rversion _ _) -> TRversion
+	(Tauth _ _ _) -> TTauth
+	(Rauth _) -> TRauth
+	(Tflush _) -> TTflush
+	(Rflush) -> TRflush
+	(Tattach _ _ _ _) -> TTattach
+	(Rattach _) -> TRattach
+	(Rerror _) -> TRerror
+	(Twalk _ _ _) -> TTwalk
+	(Rwalk _) -> TRwalk
+	(Topen _ _) -> TTopen
+	(Ropen _ _) -> TRopen
+	(Tcreate _ _ _ _) -> TTcreate
+	(Rcreate _ _) -> TRcreate
+	(Tread _ _ _) -> TTread
+	(Rread _) -> TRread
+	(Twrite _ _ _) -> TTwrite
+	(Rwrite _) -> TRwrite
+	(Tclunk _) -> TTclunk
+	(Rclunk) -> TRclunk
+	(Tremove _) -> TTremove
+	(Rremove) -> TRremove
+	(Tstat _) -> TTstat
+	(Rstat _) -> TRstat
+	(Twstat _ _) -> TTwstat
+	(Rwstat) -> TRwstat
 
-        (Twstat fid stat) -> 4 + size stat
-        (Rwstat) -> 0
-
+-- --------------------------------------------------------------------
+-- $example
+--
+-- Exchanging initial version data with any 9P2000 server
+--
+-- > module Main where
+--
+-- > import Data.Maybe
+-- > import Control.Monad
+-- > import qualified Data.ByteString.Lazy.Char8 as C
+-- > import Network.Socket hiding (send, recv)
+-- > import Network.Socket.ByteString.Lazy
+-- > import Data.Int
+-- > import Data.Binary.Get
+-- > import Data.Binary.Put
+-- > import Debug.Trace
+-- > import Data.NineP
+-- > 
+-- > connector :: IO Socket 
+-- > connector = withSocketsDo $
+-- >             do
+-- >               ainfo <- getAddrInfo Nothing (Just "127.0.0.1") (Just "6872")
+-- >               let a = head ainfo
+-- >               sock <- socket AF_INET Stream defaultProtocol
+--
+-- At this point we've just created our socket to a machine on 127.0.0.1:6872 
+-- where we'd expect to see a 9P2000 server.
+--
+-- >               putStrLn "Trying to connect"
+-- >               connect sock (addrAddress (traceShow a a))
+-- >               putStrLn "connected!"
+--
+-- The socket is connected at this point, build up a TVersion message, asking
+-- to speak to the server with the 9P2000 protocol. 
+--
+-- The 1024 tells the server the maximum message size we'd like to support.
+--
+-- >               let version = NinePkt TTversion (-1) $ Tversion 1024 "9P2000"
+-- >               putStrLn $ "About to send: " ++ show version
+--
+-- We now need to pack the message into a bytestring.  This is handled by the
+-- Bin class instance /NinePkt/, and the serialization is handled by runPut.
+-- We send this data to the socket.
+--
+-- >               send sock $ runPut (put version) 
+-- >               putStrLn "Getting response"
+--
+-- Now wait for a response from the server, evaluated runGet over it to 
+-- de-serialize it, and show it.
+--
+-- >               msg <- recv sock 50
+-- >               let response = runGet get msg :: NinePkt
+-- >               putStrLn $ show response
+-- >               return sock
