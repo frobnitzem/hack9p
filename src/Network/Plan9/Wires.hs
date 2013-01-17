@@ -8,7 +8,7 @@ import Data.Maybe (fromMaybe,mapMaybe)
 import qualified Data.Traversable as T
 import qualified Data.Set as S
 import Control.Monad (foldM)
-{- Note that Netwire 4.0.5 doesn't export TimedMap's constructor, 
+{- Note that Netwire 4.0.7 doesn't export TimedMap's constructor, 
  - so I altered it as follows:
  -           TimedMap(..),
  -}
@@ -74,13 +74,13 @@ type WireMap k m a b = TimedMap Time k (StrategyWire m a b)
 -- the wire creator decides to inhibit instead.
 fork :: (Monad m, Ord k)
      => Wire e m k (StrategyWire m a b) 
-     -> Wire e m (k,a) [(k,b)]
-     -- -> Wire (e,[(k,b)]) m (k,a) [(k,b)] -- | TODO: figure out error handling so as to not discard pending messages
+     -> Wire (e,[(k,b)]) m (k,a) [(k,b)]
 fork genr = loopArr Tm.empty $ {- ((k,a), WireMap) -}
 	second ((time &&& arr id) >>> cleaner) {- ((k, a), ([(k,b)], (Time,WireMap))) -}
 	  >>> arr (\ (ka, (lb, twm)) -> ((ka,twm), lb)) {- (((k, a), (Time,WireMap)), [(k, b)]) -}
-	  >>> first (runFork genr {- ((k, b), (Time, WireMap)) -}) -- Route via WireMap
-	  >>> arr (\ ((kb,(t,wm)),lkb) -> (kb:lkb, wm)) {- ([(k, b)], WireMap) -}
+	  >>> (first (runFork genr {- ((k, b), (Time, WireMap)) -}) -- Route via WireMap
+	         >>> arr (\ ((kb,(t,wm)),lkb) -> (kb:lkb, wm)) {- ([(k, b)], WireMap) -}
+	       <?> mkFix (\_ (((_, (_,wm)), lkb),e) -> Left ((e,lkb),wm)))
 
 -- | I vant to vash and vipe your vindows.
 cleaner :: (Monad m, Ord k) => Wire e m (Time, WireMap k m a b) ([(k,b)], (Time, WireMap k m a b))
@@ -95,16 +95,15 @@ cleaner = mkGen $ \ _ (t, wm) -> do
 		    return $ case eb of
 			Right (b,etn) -> ((k,b):lkb, Tm.insert (t+etn) k w wm')
 			Left  b     -> ((k,b):lkb, Tm.delete k wm')
-	    (lkb, rwm) <- foldM run1 ([],wm) (splitTm t wm)
+	    (lkb, rwm) <- foldM run1 ([],wm) (splitAssoc t wm)
 	    return (Right (lkb, (t,rwm)), cleaner)
 
 -- | The insertion time (t0) is the absolute expiration time.
 -- dt < 0 => unexpired, >= 0 => expired.
 runFork :: (Monad m, Ord k)
 	=> Wire e m k (StrategyWire m a b)
-	-> Wire (e, WireMap k m a b) m
-		((k,a), (Time, WireMap k m a b))
-		((k,b), (Time, WireMap k m a b))
+	-> Wire e m ((k,a), (Time, WireMap k m a b))
+		    ((k,b), (Time, WireMap k m a b))
 runFork genr' = mkGen $ \ dt ((k,a), (t,wm')) -> do
 	    let {-run1 :: (Monad m, Ord k)
                     => (StrategyWire m a b, Time)
@@ -124,7 +123,7 @@ runFork genr' = mkGen $ \ dt ((k,a), (t,wm')) -> do
 		Nothing -> do
 			(ew, genr) <- stepWire genr' dt k
 			case ew of
-			    Left err -> return (Left (err, wm'), runFork genr)
+			    Left err -> return (Left err, runFork genr)
 			    Right w -> do
 				(b, mtrans) <- run1 (w, t)
 				let wm = fromMaybe id mtrans wm' -- ignore on inh
@@ -147,8 +146,8 @@ loopArr s0 w0 = mkGen $ \dt a -> do
 
 -- | Return an association list of (k,(a,t)) values with t <= t0.
 -- This really belongs to Control.Wire.TimedMap
-splitTm :: (Ord k, Ord t) => t -> TimedMap t k a -> [(k,(a,t))]
-splitTm t0 (TimedMap mk' mt') = mk
+splitAssoc :: (Ord k, Ord t) => t -> TimedMap t k a -> [(k,(a,t))]
+splitAssoc t0 (TimedMap mk' mt') = mk
     where
     (older', middle, mt) = M.splitLookup t0 mt'
     mk =
@@ -156,4 +155,26 @@ splitTm t0 (TimedMap mk' mt') = mk
         S.toList .
         M.foldl' S.union S.empty .
         maybe id (M.insert t0) middle $ older'
+
+-- | Handle an inhibiting wire by either throwing another
+-- inhibition value or producing an output value.
+--
+-- * Inhibits: when the first wire inhibits and the second
+-- argument returns 'Left err'
+
+handler :: (Monad m) => Wire e m a b -> Wire e' m (a,e) b -> Wire e' m a b
+handler w' h' = handler' 0 w' h'
+    where handler' !t w0 h0 = mkGen $ \dt a -> do
+                (eb, w) <- stepWire w0 dt a
+                case eb of
+                    (Left  e) -> do
+                        (eb', h) <- stepWire h0 (t+dt) (a,e)
+                        return (eb', handler w h)
+                    (Right b) -> return (Right b, handler' (t+dt) w h0)
+infix 0 <?>
+
+-- | Synonym for `handler`
+
+(<?>) :: (Monad m) => Wire e m a b -> Wire e' m (a,e) b -> Wire e' m a b
+(<?>) = handler
 

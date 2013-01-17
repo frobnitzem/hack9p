@@ -13,6 +13,7 @@ module Network.Plan9 (
   , module Network.Plan9.Builder
   , module Network.Plan9.Parser
   , module Network.Plan9.Wires
+  , module Network.Plan9.Server
     -- Da Funk
     --Network.Plan9
 ) where
@@ -22,6 +23,7 @@ import Network.Plan9.Consts
 import Network.Plan9.Builder
 import Network.Plan9.Parser
 import Network.Plan9.Wires
+import Network.Plan9.Server
 
 {- $quick_intro
 

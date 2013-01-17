@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, TupleSections #-}
 -- |
 -- Module:     Network.Plan9.Server
 -- Copyright:  (c) 2013 David M. Rogers
@@ -12,6 +12,7 @@ module Network.Plan9.Server
 
 import Control.Wire
 import Data.Word
+import Data.Maybe (mapMaybe)
 import Data.ByteString.Lazy (ByteString)
 import Control.Arrow
 
@@ -101,23 +102,30 @@ data OpenFidH m = OpenFidH {
 
 -- Top-level function, returning a network IO wire from
 -- a FileSysH
--- It looks like: (IO) --> sort-by-tag [ < Sort-by-(NS/File op) |NS -> send to NSH   >]-> Assemble Tag
+-- It looks like: (IO) >>> sort-by-tag [ < Sort-by-(NS/File op) |NS -> send to NSH   >]-> Assemble Tag
 --                                       < |file -> sort-by-fid --> send to FileWire >
 --                                  -> Check for Error and send RError if so.
 -- an error thrown at this level indicates an internal server error.
 -- 
 -- This wire keeps an internal state listing all `attached' NameSpace handlers (NSH-s)
 -- and tags routed to them.
-type ServerWire m = Wire String m NinePkt [(Word16, Maybe NineMsg)]
+-- type StrategyWire m a b = Wire b m (Maybe a) (b,Time)
+-- fork :: (Monad m, Ord k)
+--      => Wire e m k (StrategyWire m a b)
+--      -> Wire (e,[(k,b)]) m (k,a) [(k,b)]
+type ServerWire m = Wire (ServerError m, [(Word16, Maybe NineMsg)]) m NinePkt [(Word16, NineMsg)]
 mkServer :: (Monad m) => FileSysH m -> ServerWire m
-mkServer (FileSysH exts attach) = fork (pure $ arr serve)
+mkServer (FileSysH exts attach) =
+	(fork $ arr (\_ -> mkFix (\_ -> maybe end serve))) {- [(Word16, Maybe NineMsg)] -}
+		>>> arr (mapMaybe (\(a,b) -> b >>= Just . (a,)))
     where
-       serve (Tversion sz "9P2000") = inhibit . Just $ Rversion (maxsz sz) "9P2000"
+       serve (Tversion sz "9P2000") = Left . Just $ Rversion (maxsz sz) "9P2000"
        serve (Tversion sz ver) = case T.take 7 ver of
-		"9P2000." -> inhibit . Just $ Rversion (maxsz sz) "9P2000"
-		_	  -> inhibit . Just $ Rerror "Unsupported Protocol."
-       serve _ = inhibit . Just $ Rerror "Unrecognized cmd."
+		"9P2000." -> Left . Just $ Rversion (maxsz sz) "9P2000"
+		_	  -> Left . Just $ Rerror "Unsupported Protocol."
+       serve _ = Left . Just $ Rerror "Unrecognized cmd."
        maxsz = max 65536
+       end = Left Nothing
 
 {-
 mkNSH :: (Monad m) => NineMsg -> NineMsg
