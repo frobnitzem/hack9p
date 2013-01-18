@@ -46,11 +46,11 @@ sError err = SError err (return())
 type SrvWire m = Wire (ServerError m) m
 
 data AttReq = AttReq {
-  fid   :: Word32,
-  afid  :: Word32,
+--  fid   :: Word32,
+--  afid  :: Word32,
   uname :: String,
-  aname :: String,
-  n_uname :: Word32 -- 9P2000
+  aname :: String
+--  n_uname :: Word32 -- 9P2000
 }
 {- |  The most signifigant change to the create operation is the new permission
  - modes which allow for creation of special files.  In addition to creating
@@ -72,10 +72,42 @@ data OpenResp = OpenResp {
   iounit :: Word32
 }
 
+-- | Handlers forming the Server Pipeline
 data FileSysH m = FileSysH {
-    exts   :: String, -- extensions accepted by the server (e.g. ".u" for 9P2000)
-    attach :: (SrvWire m) AttReq (Qid, NSH m)
+    exts   :: [String], -- extensions accepted by the server (e.g. ".u" for 9P2000)
+    attach :: (SrvWire m) AttReq (FidH m, NSH m)
 }
+fileSysH (FileSysH exts attach) = self
+    where self = mkGen $ \ dt msg ->
+	case msg of Tversion sz ex -> return $ Rversion sz ex
+		Tattach  a b c -> do
+			(minfo, at') <- stepWire attach dt (AttReq a b c)
+			case minfo of
+				Right (qid, fh, nsh) -> need to add to map here...
+				Left err -> return (Left err, fileSysH (FileSysH exts at'))
+		ow -> do
+			need to run map here
+
+-- | 1. This says how to strip the leading routing info. from the packet.
+--   2. This provides a 'new handler' function for never-before-seen routes,
+--      and defaults to those new routes in the future.
+--       - this is used advantageously to separate the routing into stages
+--       with the same logical structure.
+--   3. It allows the handler creation to change as new handlers are added.
+fileSysH (FileSysH exts attach) = demux_fid >>> fork $ mkGen $ \ _ (fid, att) ->
+	case att of
+	    Tattach a b c -> do
+		(minfo, at') <- stepWire attach dt (AttReq a b c)
+		case minfo of
+			Right (fidh, nsh) -> return $ nsH fidh nsh
+			Left err -> return (Left err, fileSysH (FileSysH exts at'))
+	    _ -> return (inhibit "EINVAL: Unrecognized fid.")
+
+nsH fidh (NSH walk create remove detach) = demux_fid >>> fork $ mkGen $ \ _ (fid, att) ->
+	
+
+fidH (FidH stat wstat open clunk) =
+
 data NSH m = NSH {
     walk   :: (SrvWire m) [String] ([Qid], FidH m),
     create :: (SrvWire m) CreateReq (OpenResp, FidH m),
@@ -113,7 +145,7 @@ data OpenFidH m = OpenFidH {
 -- fork :: (Monad m, Ord k)
 --      => Wire e m k (StrategyWire m a b)
 --      -> Wire (e,[(k,b)]) m (k,a) [(k,b)]
-type ServerWire m = Wire (ServerError m, [(Word16, Maybe NineMsg)]) m NinePkt [(Word16, NineMsg)]
+type ServerWire m = Wire (ServerError m) m NinePkt [(Word16, NineMsg)]
 mkServer :: (Monad m) => FileSysH m -> ServerWire m
 mkServer (FileSysH exts attach) =
 	(fork $ arr (\_ -> mkFix (\_ -> maybe end serve))) {- [(Word16, Maybe NineMsg)] -}
@@ -126,6 +158,32 @@ mkServer (FileSysH exts attach) =
        serve _ = Left . Just $ Rerror "Unrecognized cmd."
        maxsz = max 65536
        end = Left Nothing
+
+data SrvWire = SrvWire 
+
+fork (simple <|> fork w)
+
+instance Monad ServerWire where
+  return a = 
+  a >>= b = fork $ mkFix ()
+
+-- | Fork to handle ea. fid separately.
+fidReq = fork $ arr (fid -> translateA msg)
+  where translateA = mkFix $ \ _ -> translate
+        translate msg = case msg of
+	    Twalk fid _ -> (fid, Walkto _)
+
+forkServer :: Wire (ServerError m) m Word16 (StrategyWire m NineMsg NineMsg)
+forkServer :: (Monad m) => (SrvWire m) AttReq (Qid, NSH m) -> 
+forkServer attach = 
+
+type FidHandlerWire m :: Wire (ServerError m) m NineMsg (StrategyWire m NineMsg NineMsg)
+attHandler :: FidHandlerWire m
+
+-- | * Example RamDisk Server:
+
+ramDisk = FileSysH [] attach
+ramDisk = mkServer ramDisk
 
 {-
 mkNSH :: (Monad m) => NineMsg -> NineMsg
