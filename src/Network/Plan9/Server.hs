@@ -47,10 +47,10 @@ type SrvWire m = Wire (ServerError m) m
 
 data AttReq = AttReq {
   fid   :: Word32,
-  afid  :: Word32,
+--  afid  :: Word32,
   uname :: String,
   aname :: String,
-  n_uname :: Word32 -- 9P2000
+--  n_uname :: Word32 -- 9P2000
 }
 {- |  The most signifigant change to the create operation is the new permission
  - modes which allow for creation of special files.  In addition to creating
