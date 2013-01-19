@@ -76,16 +76,17 @@ fork :: (Monad m, Ord k)
      => Wire e m k (StrategyWire m a b) 
      -> Wire (e,[(k,b)]) m (k,a) [(k,b)]
 fork genr = loopArr Tm.empty $ {- ((k,a), WireMap) -}
-	second ((time &&& arr id) >>> cleaner) {- ((k, a), ([(k,b)], (Time,WireMap))) -}
-	  >>> arr (\ (ka, (lb, twm)) -> ((ka,twm), lb)) {- (((k, a), (Time,WireMap)), [(k, b)]) -}
-	  >>> (first (runFork genr {- ((k, b), (Time, WireMap)) -}) -- Route via WireMap
-	         >>> arr (\ ((kb,(t,wm)),lkb) -> (kb:lkb, wm)) {- ([(k, b)], WireMap) -}
-	       <?> mkFix (\_ (((_, (_,wm)), lkb),e) -> Left ((e,lkb),wm)))
+	second (cleaner 0) {- ((k, a), ([(k,b)], WireMap)) -}
+	  >>> arr (\ (ka, (lb, wm)) -> ((ka,wm), lb)) {- (((k, a), WireMap), [(k, b)]) -}
+	  >>> (first (runFork genr 0 {- ((k, b), WireMap) -}) -- Route via WireMap
+	         >>> arr (\ ((kb,wm),lkb) -> (kb:lkb, wm)) {- ([(k, b)], WireMap) -}
+	       <?> mkFix (\_ (((_, wm), lkb),e) -> Left ((e,lkb),wm)))
 
--- | I vant to vash and vipe your vindows.
-cleaner :: (Monad m, Ord k) => Wire e m (Time, WireMap k m a b) ([(k,b)], (Time, WireMap k m a b))
-cleaner = mkGen $ \ _ (t, wm) -> do
-	    let run1 :: (Monad m, Ord k)
+-- | Send Nothing to timed-out wires and collect their responses.
+cleaner :: (Monad m, Ord k) => Time -> Wire e m (WireMap k m a b) ([(k,b)], (WireMap k m a b))
+cleaner t' = mkGen $ \ dt wm -> do
+	    let t = t' + dt
+		run1 :: (Monad m, Ord k)
 		    => ([(k,b)], WireMap k m a b)
 		    -> (k, (StrategyWire m a b, Time))
 		    -> m ([(k,b)], WireMap k m a b)
@@ -96,16 +97,18 @@ cleaner = mkGen $ \ _ (t, wm) -> do
 			Right (b,etn) -> ((k,b):lkb, Tm.insert (t+etn) k w wm')
 			Left  b     -> ((k,b):lkb, Tm.delete k wm')
 	    (lkb, rwm) <- foldM run1 ([],wm) (splitAssoc t wm)
-	    return (Right (lkb, (t,rwm)), cleaner)
+	    return (Right (lkb, rwm), cleaner t)
 
 -- | The insertion time (t0) is the absolute expiration time.
 -- dt < 0 => unexpired, >= 0 => expired.
 runFork :: (Monad m, Ord k)
 	=> Wire e m k (StrategyWire m a b)
-	-> Wire e m ((k,a), (Time, WireMap k m a b))
-		    ((k,b), (Time, WireMap k m a b))
-runFork genr' = mkGen $ \ dt ((k,a), (t,wm')) -> do
-	    let {-run1 :: (Monad m, Ord k)
+	-> Time
+	-> Wire e m ((k,a), (WireMap k m a b))
+		    ((k,b), (WireMap k m a b))
+runFork genr' t' = mkGen $ \ dt ((k,a), wm') -> do
+	    let t = t' + dt
+		{-run1 :: (Monad m, Ord k)
                     => (StrategyWire m a b, Time)
                     -> m (b, Maybe(WireMap k m a b -> WireMap k m a b)) -}
 		run1 (w0,t0) = do
@@ -119,15 +122,100 @@ runFork genr' = mkGen $ \ dt ((k,a), (t,wm')) -> do
 		Just wt0 -> do
 			(b, mtrans) <- run1 wt0
 			let wm = fromMaybe (Tm.delete k) mtrans wm' -- delete on inh
-			return (Right ((k,b), (t,wm)), runFork genr')
+			return (Right ((k,b), wm), runFork genr' t)
 		Nothing -> do
 			(ew, genr) <- stepWire genr' dt k
 			case ew of
-			    Left err -> return (Left err, runFork genr)
+			    Left err -> return (Left err, runFork genr t)
 			    Right w -> do
 				(b, mtrans) <- run1 (w, t)
 				let wm = fromMaybe id mtrans wm' -- ignore on inh
-				return (Right ((k,b), (t,wm)), runFork genr)
+				return (Right ((k,b), wm), runFork genr t)
+	    --wm `seq` return (Right (b, wm), runStMap genr) -- require eval. of wm??
+
+-- | You fought with my father in the clone wars?
+data CloneResp' k m a b = Done
+		        | Clone (Time, k, CloneWire k m a b)
+type CloneResp k m a b = (b, CloneResp' k m a b)
+
+-- | The type of wire that returns either a response or
+-- a witty remark plus instructions to build an army for the Republic.
+data CloneWire k m a b = StrategyWire m a (CloneResp k m a b)
+
+-- | Take you to him, I will.
+type CloneMap k m a b = TimedMap Time k (CloneWire k m a b)
+
+-- | cloneFork is a fork where handlers may install peers
+-- (e.g. a walk creating a handler for the new fid.)
+cloneFork :: (Monad m, Ord k)
+	=> Wire e m k (CloneWire m a b)
+	-> Wire (e,[(k,b)]) m (k,a) [(k,b)]
+cloneFork genr = loopArr Tm.empty $ {- ((k,a), CloneMap) -}
+	second (cleanerC 0) {- ((k, a), ([(k,b)], CloneMap)) -}
+	  >>> arr (\ (ka, (lb, wm)) -> ((ka,wm), lb)) {- (((k, a), CloneMap), [(k, b)]) -}
+	  >>> (first (runForkC genr 0 {- ((k, b), CloneMap) -}) -- Route via CloneMap
+	         >>> arr (\ ((kb,wm),lkb) -> (kb:lkb, wm)) {- ([(k, b)], CloneMap) -}
+	       <?> mkFix (\_ (((_, wm), lkb),e) -> Left ((e,lkb),wm)))
+
+-- | Send to Kamino to search for source of poison darts.
+cleanerC :: (Monad m, Ord k)
+	 => Time
+	 -> Wire e m (CloneMap k m a b) ([(k,b)], (CloneMap k m a b))
+cleanerC t' = mkGen $ \ dt wm -> do
+	    let t = t' + dt
+		run1 :: (Monad m, Ord k)
+		    => ([(k,b)], CloneMap k m a b)
+		    -> (k, (CloneWire m a b, Time))
+		    -> m ([(k,b)], CloneMap k m a b)
+	        run1 (lkb, wm') (k, (w0, t0)) = do
+		    let dt = t - t0
+		    (ec, w) <- dt `seq` stepWire w0 dt Nothing
+		    return $ case ec of
+			Right ((b,c),etn) -> ((k,b):lkb, (conscript c . Tm.insert (t+etn) k w) wm')
+			Left   (b,c)      -> ((k,b):lkb, (conscript c t . Tm.delete k) wm')
+	    (lkb, rwm) <- foldM run1 ([],wm) (splitAssoc t wm)
+	    return (Right (lkb, rwm), cleanerC t)
+
+-- | Insert a clone into a CloneMap.
+conscript :: (Monad m, Ord k)
+	  => CloneResp' k m a b
+	  -> Time
+	  -> CloneMap k m a b
+	  -> CloneMap k m a b
+conscript Done _ x = x
+conscript (Clone (dt,k,w)) t = Tm.insert (t+dt) k w
+
+-- | The insertion time (t0) is the absolute expiration time.
+-- dt < 0 => unexpired, >= 0 => expired.
+runForkC :: (Monad m, Ord k)
+	=> Wire e m k (CloneWire m a b)
+	-> Time
+	-> Wire e m ((k,a), (CloneMap k m a b))
+		    ((k,b), (CloneMap k m a b))
+runForkC genr' t' = mkGen $ \ dt ((k,a), wm') -> do
+	    let t = t' + dt
+		{-run1 :: (Monad m, Ord k)
+                    => (CloneWire m a b, Time)
+		    -> CloneMap k m a b -> CloneMap k m a b
+                    -> m (b, CloneMap k m a b) -}
+		run1 (w0,t0) ondel = do
+		    let dt = t - t0
+		    (ec, w) <- dt `seq` stepWire w0 dt (Just a)
+		    return $ case ec of
+			Right ((b,c),etn) -> (b, (conscript c t . Tm.insert (t+etn) k w) wm')
+			Left   (b,c)      -> (b, (conscript c t . ondel) wm')
+	    
+	    case Tm.lookup k wm' of
+		Just wt0 -> do
+			(b, wm) <- run1 wt0 (Tm.delete k) -- delete on inh
+			return (Right ((k,b), wm), runForkC genr' t)
+		Nothing -> do
+			(ew, genr) <- stepWire genr' dt k
+			case ew of
+			    Left err -> return (Left err, runForkC genr t)
+			    Right w -> do
+				(b, wm) <- run1 (w, t) id -- ignore on inh
+				return (Right ((k,b), wm), runForkC genr t)
 	    --wm `seq` return (Right (b, wm), runStMap genr) -- require eval. of wm??
 
 -- | Construct a wire from the given local state transision
