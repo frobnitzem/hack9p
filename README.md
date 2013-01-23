@@ -15,6 +15,7 @@ structures.  These (mainly the latter) are used for (de)serializing
 and Network.Plan9.Parser.  There's a set of QuickCheck tests
 in Tests.hs, which can be run right away with:
 > runghc -isrc Tests.hs
+
 These will eventually be developed into full-fledged client and server
 examples.
 

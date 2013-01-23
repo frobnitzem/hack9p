@@ -45,14 +45,7 @@ sError err = SError err (return())
 -- violence in there.
 type SrvWire m = Wire (ServerError m) m
 
-data AttReq = AttReq {
---  fid   :: Word32,
---  afid  :: Word32,
-  uname :: String,
-  aname :: String
---  n_uname :: Word32 -- 9P2000
-}
-{- |  The most signifigant change to the create operation is the new permission
+{- |  The most significant change to the create operation is the new permission
  - modes which allow for creation of special files.  In addition to creating
  - directories with DMDIR, 9P2000.u allows the creation of symlinks (DMSYMLINK),
  - devices (DMDEVICE), named pipes (DMNAMEPIPE), and sockets (DMSOCKET).
@@ -60,71 +53,125 @@ data AttReq = AttReq {
  - For DSYMLINK files, the string is the target of the link. For DMDEVICE files,
  - the string is "b 1 2" for a block device with major 1, minor 2. For normal
  - files, this string is empty. 
- -}
-data CreateReq = CreateReq {
-  name :: String,
-  perm :: Word32,
-  mode :: Word8
---  exts :: String
-}
 data OpenResp = OpenResp {
   qid :: Qid,
   iounit :: Word32
 }
+-}
 
 -- | Handlers forming the Server Pipeline
 data FileSysH m = FileSysH {
-    exts   :: [String], -- extensions accepted by the server (e.g. ".u" for 9P2000)
-    attach :: (SrvWire m) AttReq (FidH m, NSH m)
+    fsexts   :: [String], -- extensions accepted by the server (e.g. ".u" for 9P2000)
+    fsattach :: (SrvWire m) (String,String) (Qid, FidH m)
 }
+{- Without utilizing fork:
 fileSysH (FileSysH exts attach) = self
     where self = mkGen $ \ dt msg ->
 	case msg of Tversion sz ex -> return $ Rversion sz ex
 		Tattach  a b c -> do
-			(minfo, at') <- stepWire attach dt (AttReq a b c)
-			case minfo of
-				Right (qid, fh, nsh) -> need to add to map here...
+			(einfo, at') <- stepWire attach dt (AttReq a b c)
+			case einfo of
+				Right (qid, fh) -> need to add to map here...
 				Left err -> return (Left err, fileSysH (FileSysH exts at'))
 		ow -> do
 			need to run map here
-
+-}
 -- | 1. This says how to strip the leading routing info. from the packet.
 --   2. This provides a 'new handler' function for never-before-seen routes,
 --      and defaults to those new routes in the future.
 --       - this is used advantageously to separate the routing into stages
 --       with the same logical structure.
 --   3. It allows the handler creation to change as new handlers are added.
-fileSysH (FileSysH exts attach) = demux_fid >>> fork $ mkGen $ \ _ (fid, att) ->
-	case att of
-	    Tattach a b c -> do
-		(minfo, at') <- stepWire attach dt (AttReq a b c)
-		case minfo of
-			Right (fidh, nsh) -> return $ nsH fidh nsh
+--   The file system handler pulls the fid values from all input packets,
+--   and routes them to the appropriate, established, fid-handlers.
+--   The cloneFork allows those fid handlers to insert new fid handlers
+--   as peers.
+--     That means the only message to handle at this level is
+--   the attach message.  It also means that the server departs from the Plan9
+--   spec in that open fids will remain valid even if the aname is re-attached.
+fileSysH :: FileSysH -> SrvWire m NineMsg [Maybe (Word32, NineMsg)]
+fileSysH (FileSysH exts attach) = demux_fid >>> cloneFork ( arr
+	(\ _ {-new fid-} -> mkGen $ \ dt msg ->
+	  case msg of
+	    Tattach _ afid uname aname -> do
+		(einfo, at') <- stepWire attach dt (uname, aname)
+		case einfo of
+			Right (qid, fidh) -> return (Right (Rattach qid), fidH fidh)
 			Left err -> return (Left err, fileSysH (FileSysH exts at'))
-	    _ -> return (inhibit "EINVAL: Unrecognized fid.")
+	    _ -> return (Left "EINVAL: Unrecognized fid.", fileSysH (FileSysH exts at'))
+	)) >>> arr (>>= snd)
 
-nsH fidh (NSH walk create remove detach) = demux_fid >>> fork $ mkGen $ \ _ (fid, att) ->
-	
+-- | This wire specifies timeout behavior and arranges message queueing for carrying
+-- out asynchronous operations within the context of a wire.
+asyncWire :: Time -- Allotted time.
+	  -> Wire (Maybe b) m (Maybe a) (Maybe b) -- Async operation.
+	  -> (Maybe b, StrategyWire m a (Maybe b)) -- Response and wire to switch to on incomplete.
+	  -> StrategyWire m a (Maybe b) -- Wire to switch to when complete.
+	  -> StrategyWire m a (Maybe b)
+asyncWire tout srv fail done = aW tout srv
+    where aW t srv = mkGen $ \ dt ma -> do
+	case ma of
+	    Nothing -> return ((first Left) fail) -- timeout reached.
+	    Just a -> do
+		(emb, srv') <- stepWire srv dt a
+		case emb of
+			Left err -> return (Left err, aW 0 srv')
+			Right mb -> case mb of
+				Nothing -> return (Right Nothing, aW (t-dt) srv')
+				Just b -> return (Left (Just b), done)
 
-fidH (FidH stat wstat open clunk) =
+-- | Structure which is passed to a CaseWire
+-- The output of the function is a tuple of the seed value for the wire,
+-- the destructor and constructor for FidH, and an arrow to process its output.
+-- ( a, (NSH m -> SrvWire m a b),
+--  (SrvWire m a b -> NSH m -> NSH m),
+--  CloneWire k m b (Maybe c) )
+fidH :: (Monad m, Ord k)
+	    => FidH -> CloneWire k m NineMsg 
+fidH fidh = caseWire fid_op fidh
+    where fid_op msg = case msg of
+	Twalk   _ nw names -> (names, fwalk, (\ w fh -> fh{fwalk=w}), oncelerC $
+                		\(lq,fidh) -> (Rwalk lq, Clone $ fidH fidh)
+			      )
+	Tcreate _ name perm mode -> ((name, perm, mode), fcreate, (\ w fh -> fh{fcreate=w}), oncelerC $
+					\() -> (Rcreate qid iounit, Done)
+				    )
+	Tremove _ -> ((), fremove, (\ w fh -> fh{fremove=w}), oncelerC $
+			\ _ -> (Rremove, Done)
+		     )
+	Tstat   _ -> ((), fstat, (\ w fh -> fh{fstat=w}), oncelerC $
+			\ _ -> (Rstat stat, Done)
+		     )
+	Twstat  _ stat -> (stat, fwstat, (\ w fh -> fh{fwstat=w}), oncelerC $
+			\ _ -> (Rwstat, Done)
+		     )
+	Topen   _ mode -> (mode, fopen, (\ w fh -> fh{fopen=w}), oncelerC $
+				\() -> (Ropen qid iounit, Done)
+			  )
+	Tclunk  _ -> ((), fclunk, (\ w fh -> fh{fclunk=w}), oncelerC $
+			\ _ -> (Rclunk, Done)
+		     )
 
 data NSH m = NSH {
-    walk   :: (SrvWire m) [String] ([Qid], FidH m),
-    create :: (SrvWire m) CreateReq (OpenResp, FidH m),
-    remove :: (SrvWire m) () (),
-    detach :: (SrvWire m) () () -- connection shutdown function, called after all clunks.
+    nswalk   :: SrvWire m [String] ([Qid], FidH m),
+    nscreate :: SrvWire m (String, Word32, Word8) (Qid, Word32, FidH m),
+    nsremove :: SrvWire m () (),
 }
+
+-- | Operations referencing the current Fid.
 data FidH m = FidH {
-    stat  :: (SrvWire m) () Stat,
-    wstat :: (SrvWire m) Stat (),
-    open  :: (SrvWire m) Word8 (OpenResp, OpenFidH m),
-    clunk :: (SrvWire m) () ()
+    fnsh     :: NSH m,
+    fstat   :: SrvWire m () Stat,
+    fwstat  :: SrvWire m Stat (),
+    fopen   :: SrvWire m Word8 (Qid, Word32, OpenFidH m),
+    fclunk  :: SrvWire m () ()
 }
 
 -- TODO: check what we can do to make these interruptable when flush comes along.
 data OpenFidH m = OpenFidH {
-    read :: (SrvWire m) (Word64,Word32) (Word32,ByteString),
-    write :: (SrvWire m) (Word64,Word32,ByteString) Word32
+    ofidh :: FidH m,
+    ofread :: (SrvWire m) (Word64,Word32) (Word32,ByteString),
+    ofwrite :: (SrvWire m) (Word64,Word32,ByteString) Word32
 }
 
 {- The main body of the server specifies the hard and
@@ -174,7 +221,7 @@ fidReq = fork $ arr (fid -> translateA msg)
 	    Twalk fid _ -> (fid, Walkto _)
 
 forkServer :: Wire (ServerError m) m Word16 (StrategyWire m NineMsg NineMsg)
-forkServer :: (Monad m) => (SrvWire m) AttReq (Qid, NSH m) -> 
+forkServer :: (Monad m) => (SrvWire m) (Word32, String, String) (Qid, NSH m) -> 
 forkServer attach = 
 
 type FidHandlerWire m :: Wire (ServerError m) m NineMsg (StrategyWire m NineMsg NineMsg)

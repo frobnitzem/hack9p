@@ -17,6 +17,32 @@ import Control.Wire.Wire
 import Control.Wire.Prefab (time)
 import Data.Map (Map)
 
+-- | The output of a case statement for routing incoming data
+-- across wires stored in a structure.
+type WCases st e m a b c = (a, st -> Wire e m a b, Wire e m a b -> st -> st, Wire e m b c)
+
+-- | A CaseWire is a wire that keeps an internal struct of wires,
+-- and routes to each depending upon some case-matching on the input.
+-- It thus needs the matching function to produce the wire input,
+-- the struct destructor / constructor, and a wire to process
+-- the output.  Using these, it nicely wraps the case-computation.
+-- TODO: Use the dt value by keeping a record of the time of last call
+-- to each structure member...
+caseWire :: (Monad m)
+	 => (a -> WCases st e m a' b c)
+	 -> st
+	 -> Wire e m a c
+caseWire cfn st = mkGen $ \ dt a -> do
+	let (a', dst, cst, wbc) = cfn a
+	    w = dst st
+	(eb, w') <- stepWire w dt a'
+	let self = caseWire cfn (cst w' st)
+	case eb of
+	    Left err -> return (Left err, self)
+	    Right b -> do
+		(ec, _) <- stepWire wbc dt b
+		return (ec, self)
+
 
 -- | A StrategyWire is a humble worker in a sea of IO.
 type StrategyWire m a b = Wire b m (Maybe a) (b,Time)
@@ -133,6 +159,17 @@ runFork genr' t' = mkGen $ \ dt ((k,a), wm') -> do
 				return (Right ((k,b), wm), runFork genr t)
 	    --wm `seq` return (Right (b, wm), runStMap genr) -- require eval. of wm??
 
+-- | A simple one-time response that doesn't require any strategy.
+onceler  :: (Monad m) => (a -> Maybe b) -> StrategyWire m a (Maybe b)
+onceler f = mkFix $ \ _ -> Left . (>>= f)
+
+-- | A simple one-time response for clones that doesn't require any strategy.
+oncelerC :: (Monad m, Ord k) => (a -> CloneResp k m a (Maybe b)) -> CloneWire k m a (Maybe b)
+oncelerC f = mkFix $ \ _ -> Left . defclone
+    where defclone ma = case ma of
+			Just a  -> f a
+			Nothing -> (Nothing, Done)
+
 -- | You fought with my father in the clone wars?
 data CloneResp' k m a b = Done
 		        | Clone (Time, k, CloneWire k m a b)
@@ -140,7 +177,7 @@ type CloneResp k m a b = (b, CloneResp' k m a b)
 
 -- | The type of wire that returns either a response or
 -- a witty remark plus instructions to build an army for the Republic.
-data CloneWire k m a b = StrategyWire m a (CloneResp k m a b)
+type CloneWire k m a b = StrategyWire m a (CloneResp k m a b)
 
 -- | Take you to him, I will.
 type CloneMap k m a b = TimedMap Time k (CloneWire k m a b)
@@ -148,8 +185,8 @@ type CloneMap k m a b = TimedMap Time k (CloneWire k m a b)
 -- | cloneFork is a fork where handlers may install peers
 -- (e.g. a walk creating a handler for the new fid.)
 cloneFork :: (Monad m, Ord k)
-	=> Wire e m k (CloneWire m a b)
-	-> Wire (e,[(k,b)]) m (k,a) [(k,b)]
+	  => Wire e m k (CloneWire k m a b)
+	  -> Wire (e,[(k,b)]) m (k,a) [(k,b)]
 cloneFork genr = loopArr Tm.empty $ {- ((k,a), CloneMap) -}
 	second (cleanerC 0) {- ((k, a), ([(k,b)], CloneMap)) -}
 	  >>> arr (\ (ka, (lb, wm)) -> ((ka,wm), lb)) {- (((k, a), CloneMap), [(k, b)]) -}
@@ -163,15 +200,15 @@ cleanerC :: (Monad m, Ord k)
 	 -> Wire e m (CloneMap k m a b) ([(k,b)], (CloneMap k m a b))
 cleanerC t' = mkGen $ \ dt wm -> do
 	    let t = t' + dt
-		run1 :: (Monad m, Ord k)
+		{-run1 :: (Monad m, Ord k)
 		    => ([(k,b)], CloneMap k m a b)
 		    -> (k, (CloneWire m a b, Time))
-		    -> m ([(k,b)], CloneMap k m a b)
+		    -> m ([(k,b)], CloneMap k m a b)-}
 	        run1 (lkb, wm') (k, (w0, t0)) = do
 		    let dt = t - t0
 		    (ec, w) <- dt `seq` stepWire w0 dt Nothing
 		    return $ case ec of
-			Right ((b,c),etn) -> ((k,b):lkb, (conscript c . Tm.insert (t+etn) k w) wm')
+			Right ((b,c),etn) -> ((k,b):lkb, (conscript c t . Tm.insert (t+etn) k w) wm')
 			Left   (b,c)      -> ((k,b):lkb, (conscript c t . Tm.delete k) wm')
 	    (lkb, rwm) <- foldM run1 ([],wm) (splitAssoc t wm)
 	    return (Right (lkb, rwm), cleanerC t)
@@ -183,21 +220,21 @@ conscript :: (Monad m, Ord k)
 	  -> CloneMap k m a b
 	  -> CloneMap k m a b
 conscript Done _ x = x
-conscript (Clone (dt,k,w)) t = Tm.insert (t+dt) k w
+conscript (Clone (dt,k,w)) t x = Tm.insert (t+dt) k w x
 
 -- | The insertion time (t0) is the absolute expiration time.
 -- dt < 0 => unexpired, >= 0 => expired.
 runForkC :: (Monad m, Ord k)
-	=> Wire e m k (CloneWire m a b)
+	=> Wire e m k (CloneWire k m a b)
 	-> Time
 	-> Wire e m ((k,a), (CloneMap k m a b))
 		    ((k,b), (CloneMap k m a b))
 runForkC genr' t' = mkGen $ \ dt ((k,a), wm') -> do
 	    let t = t' + dt
 		{-run1 :: (Monad m, Ord k)
-                    => (CloneWire m a b, Time)
-		    -> CloneMap k m a b -> CloneMap k m a b
-                    -> m (b, CloneMap k m a b) -}
+                    => (CloneWire k m a b, Time)
+		    -> (CloneMap k m a b -> CloneMap k m a b)
+                    -> m (b, CloneMap k m a b)-}
 		run1 (w0,t0) ondel = do
 		    let dt = t - t0
 		    (ec, w) <- dt `seq` stepWire w0 dt (Just a)
