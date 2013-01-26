@@ -31,9 +31,9 @@ data Server = Server {
 }
 
 data ServerError m = SError {
-    ename :: String,
+    serr_name :: String,
 --    errno :: Word32, -- 9P2000
-    reset :: m ()     -- always have an exit strategy to recover the server
+    serr_reset :: m ()     -- always have an exit strategy to recover the server
 }
 -- | Report the error, but don't do any monadic action.
 sError :: (Monad m) => String -> ServerError m
@@ -41,8 +41,7 @@ sError err = SError err (return())
 
 -- | Pre-specify error and monad types
 -- all the clutter is because we parameterize over m,
--- the monad type, so users can do IO / state
--- violence in there.
+-- the monad type, so users can do IO / state violence in there.
 type SrvWire m = Wire (ServerError m) m
 
 {- |  The most significant change to the create operation is the new permission
@@ -101,25 +100,6 @@ fileSysH (FileSysH exts attach) = demux_fid >>> cloneFork ( arr
 	    _ -> return (Left "EINVAL: Unrecognized fid.", fileSysH (FileSysH exts at'))
 	)) >>> arr (>>= snd)
 
--- | This wire specifies timeout behavior and arranges message queueing for carrying
--- out asynchronous operations within the context of a wire.
-asyncWire :: Time -- Allotted time.
-	  -> Wire (Maybe b) m (Maybe a) (Maybe b) -- Async operation.
-	  -> (Maybe b, StrategyWire m a (Maybe b)) -- Response and wire to switch to on incomplete.
-	  -> StrategyWire m a (Maybe b) -- Wire to switch to when complete.
-	  -> StrategyWire m a (Maybe b)
-asyncWire tout srv fail done = aW tout srv
-    where aW t srv = mkGen $ \ dt ma -> do
-	case ma of
-	    Nothing -> return ((first Left) fail) -- timeout reached.
-	    Just a -> do
-		(emb, srv') <- stepWire srv dt a
-		case emb of
-			Left err -> return (Left err, aW 0 srv')
-			Right mb -> case mb of
-				Nothing -> return (Right Nothing, aW (t-dt) srv')
-				Just b -> return (Left (Just b), done)
-
 -- | Structure which is passed to a CaseWire
 -- The output of the function is a tuple of the seed value for the wire,
 -- the destructor and constructor for FidH, and an arrow to process its output.
@@ -160,7 +140,7 @@ data NSH m = NSH {
 
 -- | Operations referencing the current Fid.
 data FidH m = FidH {
-    fnsh     :: NSH m,
+    fnsh    :: NSH m,
     fstat   :: SrvWire m () Stat,
     fwstat  :: SrvWire m Stat (),
     fopen   :: SrvWire m Word8 (Qid, Word32, OpenFidH m),
@@ -206,40 +186,3 @@ mkServer (FileSysH exts attach) =
        maxsz = max 65536
        end = Left Nothing
 
-data SrvWire = SrvWire 
-
-fork (simple <|> fork w)
-
-instance Monad ServerWire where
-  return a = 
-  a >>= b = fork $ mkFix ()
-
--- | Fork to handle ea. fid separately.
-fidReq = fork $ arr (fid -> translateA msg)
-  where translateA = mkFix $ \ _ -> translate
-        translate msg = case msg of
-	    Twalk fid _ -> (fid, Walkto _)
-
-forkServer :: Wire (ServerError m) m Word16 (StrategyWire m NineMsg NineMsg)
-forkServer :: (Monad m) => (SrvWire m) (Word32, String, String) (Qid, NSH m) -> 
-forkServer attach = 
-
-type FidHandlerWire m :: Wire (ServerError m) m NineMsg (StrategyWire m NineMsg NineMsg)
-attHandler :: FidHandlerWire m
-
--- | * Example RamDisk Server:
-
-ramDisk = FileSysH [] attach
-ramDisk = mkServer ramDisk
-
-{-
-mkNSH :: (Monad m) => NineMsg -> NineMsg
-
----------------- The following routines work on individual fids -------------
-
--- Return an OpenFileWire by adding read/write functions atop a standard file wire
-type FileWire m :: (Monad m) => (SrvWire m) FileReq NineMsg
-mkFile :: (Monad m) => FileWire -> FileWire
-
-mkOpenFile :: (Monad m) => FileWire -> FileWire
--}
