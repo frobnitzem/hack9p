@@ -1,21 +1,27 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns, TupleSections #-}
 module Network.Plan9.Wires where
 
 import qualified Control.Wire.TimedMap as Tm
+import Control.Monad.Identity (Identity)
+import Control.Wire.TimedMap ( TimedMap (..) )
 import Control.Arrow
 import qualified Data.Map as M
 import Data.Maybe (fromMaybe,mapMaybe)
-import qualified Data.Traversable as T
+--import qualified Data.Traversable as T
 import qualified Data.Set as S
 import Control.Monad (foldM)
+import Data.Monoid (Monoid,mempty,mappend)
 {- Note that Netwire 4.0.7 doesn't export TimedMap's constructor, 
  - so I altered it as follows:
  -           TimedMap(..),
  -}
-import Control.Wire.TimedMap ( TimedMap (..) )
 import Control.Wire.Wire
-import Control.Wire.Prefab (time)
+import Control.Applicative
+--import Control.Wire.Prefab (time,after)
+import Control.Wire (time,after,id,(.),inhibit)
 import Data.Map (Map)
+
+import Prelude hiding ((.), id)
 
 -- | The output of a case statement for routing incoming data
 -- across wires stored in a structure.
@@ -163,16 +169,41 @@ runFork genr' t' = mkGen $ \ dt ((k,a), wm') -> do
 onceler  :: (Monad m) => (a -> Maybe b) -> StrategyWire m a (Maybe b)
 onceler f = mkFix $ \ _ -> Left . (>>= f)
 
--- | A simple one-time response for clones that doesn't require any strategy.
-oncelerC :: (Monad m, Ord k) => (a -> CloneResp k m a (Maybe b)) -> CloneWire k m a (Maybe b)
-oncelerC f = mkFix $ \ _ -> Left . defclone
-    where defclone ma = case ma of
-			Just a  -> f a
-			Nothing -> (Nothing, Done)
+-- | Act like the identity wire until the timeout passes, then always inhibit.
+--
+-- * Depends: current instant when producing, time.
+--
+-- * Inhibits: until the given amount of time has passed.
+
+timeOut :: (Monoid e) => Time -> Wire e m a a
+timeOut t
+    | t >= 0     = mkPure $ \dt a -> (Right a, timeOut (t - dt))
+    | otherwise  = inhibit mempty
+
+
+
+-- | Up-cast a regular StrategyWire to a NoClone wire.
+noClone :: (Monad m, Ord k) => StrategyWire m a b -> CloneWire k m a b
+noClone w = (w >>> arr (\(v,t) -> ((v,NoClone),t))) <?> mkFix (\ _ (_,r) -> Left (r,NoClone))
+
+oncelerC :: (Monad m, Ord k) => (a -> Maybe b) -> CloneWire k m a (Maybe b)
+oncelerC = noClone . onceler
+
+-- | Act like a StrategyWire, but spawn a clone on the first return.
+spawn :: (Monad m, Ord k)
+      => (Time, k, CloneWire k m a b)
+      -> StrategyWire m a b
+      -> CloneWire k m a b
+spawn cl w = mkGen $ \ dt ma -> do
+	(eb, w') <- stepWire w dt ma
+	let resp = case eb of
+		   Left err -> Left (err, Clone cl)
+		   Right (b,dt) -> Right ((b, Clone cl),dt)
+	return (resp, noClone w')
 
 -- | You fought with my father in the clone wars?
-data CloneResp' k m a b = Done
-		        | Clone (Time, k, CloneWire k m a b)
+data CloneResp' k m a b = NoClone
+		          | Clone (Time, k, CloneWire k m a b)
 type CloneResp k m a b = (b, CloneResp' k m a b)
 
 -- | The type of wire that returns either a response or
@@ -184,8 +215,10 @@ type CloneMap k m a b = TimedMap Time k (CloneWire k m a b)
 
 -- | cloneFork is a fork where handlers may install peers
 -- (e.g. a walk creating a handler for the new fid.)
+-- | The first arg. is a default wire, which can signal
+-- if it wants to hang around to process subsequent reqs on channel 'k'.
 cloneFork :: (Monad m, Ord k)
-	  => Wire e m k (CloneWire k m a b)
+	  => Wire e m (k,a) (CloneResp k m a b)
 	  -> Wire (e,[(k,b)]) m (k,a) [(k,b)]
 cloneFork genr = loopArr Tm.empty $ {- ((k,a), CloneMap) -}
 	second (cleanerC 0) {- ((k, a), ([(k,b)], CloneMap)) -}
@@ -219,13 +252,19 @@ conscript :: (Monad m, Ord k)
 	  -> Time
 	  -> CloneMap k m a b
 	  -> CloneMap k m a b
-conscript Done _ x = x
+conscript NoClone _ x = x
 conscript (Clone (dt,k,w)) t x = Tm.insert (t+dt) k w x
 
--- | The insertion time (t0) is the absolute expiration time.
--- dt < 0 => unexpired, >= 0 => expired.
+-- | This routine takes a default option and a map of clone wires
+-- and runs whatever 'k' matches.  If the wire returns a 'Clone' value,
+-- it modifies its routing table accordingly.
+-- Wires stored for re-run will see a time delta from t0, their absolute
+-- expiration time, so dt < 0 => unexpired, >= 0 => expired.
+-- That departs from the spec., but is the most useful number
+-- they could get.
+-- TODO: coalesce all changes to the map and run 'em at once.
 runForkC :: (Monad m, Ord k)
-	=> Wire e m k (CloneWire k m a b)
+	=> Wire e m (k,a) (CloneResp k m a b)
 	-> Time
 	-> Wire e m ((k,a), (CloneMap k m a b))
 		    ((k,b), (CloneMap k m a b))
@@ -235,25 +274,23 @@ runForkC genr' t' = mkGen $ \ dt ((k,a), wm') -> do
                     => (CloneWire k m a b, Time)
 		    -> (CloneMap k m a b -> CloneMap k m a b)
                     -> m (b, CloneMap k m a b)-}
-		run1 (w0,t0) ondel = do
+                run1 (w0,t0) ondel = do
 		    let dt = t - t0
 		    (ec, w) <- dt `seq` stepWire w0 dt (Just a)
 		    return $ case ec of
-			Right ((b,c),etn) -> (b, (conscript c t . Tm.insert (t+etn) k w) wm')
-			Left   (b,c)      -> (b, (conscript c t . ondel) wm')
+                        Right ((b,c),etn) -> (b, (conscript c t . Tm.insert (t+etn) k w) wm')
+                        Left   (b,c)      -> (b, (conscript c t . ondel) wm')
 	    
 	    case Tm.lookup k wm' of
 		Just wt0 -> do
-			(b, wm) <- run1 wt0 (Tm.delete k) -- delete on inh
+                        (b, wm) <- run1 wt0 (Tm.delete k) -- delete on inh
 			return (Right ((k,b), wm), runForkC genr' t)
 		Nothing -> do
-			(ew, genr) <- stepWire genr' dt k
-			case ew of
-			    Left err -> return (Left err, runForkC genr t)
-			    Right w -> do
-				(b, wm) <- run1 (w, t) id -- ignore on inh
-				return (Right ((k,b), wm), runForkC genr t)
-	    --wm `seq` return (Right (b, wm), runStMap genr) -- require eval. of wm??
+			(ec, genr) <- stepWire genr' dt (k,a)
+			return $ case ec of
+			    Right (b,c) -> let wm = conscript c t wm'
+					   in (Right ((k,b), wm), runForkC genr t)
+			    Left e  -> (Left e, runForkC genr t)
 
 -- | Construct a wire from the given local state transision
 -- wire.  The transition wire always produces a new state, even if

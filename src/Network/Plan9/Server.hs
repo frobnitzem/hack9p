@@ -44,26 +44,12 @@ sError err = SError err (return())
 -- the monad type, so users can do IO / state violence in there.
 type SrvWire m = Wire (ServerError m) m
 
-{- |  The most significant change to the create operation is the new permission
- - modes which allow for creation of special files.  In addition to creating
- - directories with DMDIR, 9P2000.u allows the creation of symlinks (DMSYMLINK),
- - devices (DMDEVICE), named pipes (DMNAMEPIPE), and sockets (DMSOCKET).
- - extension[s] is a string describing special files, depending on the mode bit.
- - For DSYMLINK files, the string is the target of the link. For DMDEVICE files,
- - the string is "b 1 2" for a block device with major 1, minor 2. For normal
- - files, this string is empty. 
-data OpenResp = OpenResp {
-  qid :: Qid,
-  iounit :: Word32
-}
--}
-
 -- | Handlers forming the Server Pipeline
 data FileSysH m = FileSysH {
     fsexts   :: [String], -- extensions accepted by the server (e.g. ".u" for 9P2000)
     fsattach :: (SrvWire m) (String,String) (Qid, FidH m)
 }
-{- Without utilizing fork:
+{- Without utilizing fork (to illustrate the problems)
 fileSysH (FileSysH exts attach) = self
     where self = mkGen $ \ dt msg ->
 	case msg of Tversion sz ex -> return $ Rversion sz ex
@@ -95,10 +81,23 @@ fileSysH (FileSysH exts attach) = demux_fid >>> cloneFork ( arr
 	    Tattach _ afid uname aname -> do
 		(einfo, at') <- stepWire attach dt (uname, aname)
 		case einfo of
-			Right (qid, fidh) -> return (Right (Rattach qid), fidH fidh)
+			Right (qid, fidh) -> return $
+				((Just . Right) (Rattach qid, NoClone), fidh)
 			Left err -> return (Left err, fileSysH (FileSysH exts at'))
 	    _ -> return (Left "EINVAL: Unrecognized fid.", fileSysH (FileSysH exts at'))
 	)) >>> arr (>>= snd)
+
+-- | Operations referencing the current Fid.
+data FidH m = FidH {
+    fwalk   :: SrvWire m [String] ([Qid], FidH m),
+    fcreate :: SrvWire m (String, Word32, Word8) (Qid, Word32, FidH m),
+    fremove :: SrvWire m () (),
+
+    fstat   :: SrvWire m () Stat,
+    fwstat  :: SrvWire m Stat (),
+    fopen   :: SrvWire m Word8 (Qid, Word32, OpenFidH m),
+    fclunk  :: SrvWire m () ()
+}
 
 -- | Structure which is passed to a CaseWire
 -- The output of the function is a tuple of the seed value for the wire,
@@ -109,45 +108,44 @@ fileSysH (FileSysH exts attach) = demux_fid >>> cloneFork ( arr
 fidH :: (Monad m, Ord k)
 	    => FidH -> CloneWire k m NineMsg 
 fidH fidh = caseWire fid_op fidh
-    where fid_op msg = case msg of
-	Twalk   _ nw names -> (names, fwalk, (\ w fh -> fh{fwalk=w}), oncelerC $
-                		\(lq,fidh) -> (Rwalk lq, Clone $ fidH fidh)
+  where fid_op msg = case msg of
+	    Twalk   _ nw names -> (names,
+				   fwalk,
+				   (\ w fh -> fh{fwalk=w}),
+				   oncelerC $ \(lq,fidh) -> (Rwalk lq, Clone $ fidH fidh)
+	    			  )
+	    Tcreate _ name perm mode -> ((name, perm, mode),
+					 fcreate,
+					 (\ w fh -> fh{fcreate=w}),
+					 oncelerC $ \() -> (Rcreate qid iounit, Done)
+				        )
+	    Tremove _ -> ((),
+			  fremove,
+			  (\ w fh -> fh{fremove=w}),
+			  oncelerC $ \ _ -> (Rremove, Done)
+			 )
+	    Tstat   _ -> ((),
+			  fstat,
+ 			  (\ w fh -> fh{fstat=w}),
+			  oncelerC $ \ _ -> (Rstat stat, Done)
+			 )
+	    Twstat  _ stat -> (stat,
+			       fwstat,
+			       (\ w fh -> fh{fwstat=w}),
+			       oncelerC $ \ _ -> (Rwstat, Done)
+	    		      )
+	    Topen   _ mode -> (mode,
+			       fopen,
+			       (\ w fh -> fh{fopen=w}),
+			       oncelerC $ \() -> (Ropen qid iounit, Done)
 			      )
-	Tcreate _ name perm mode -> ((name, perm, mode), fcreate, (\ w fh -> fh{fcreate=w}), oncelerC $
-					\() -> (Rcreate qid iounit, Done)
-				    )
-	Tremove _ -> ((), fremove, (\ w fh -> fh{fremove=w}), oncelerC $
-			\ _ -> (Rremove, Done)
-		     )
-	Tstat   _ -> ((), fstat, (\ w fh -> fh{fstat=w}), oncelerC $
-			\ _ -> (Rstat stat, Done)
-		     )
-	Twstat  _ stat -> (stat, fwstat, (\ w fh -> fh{fwstat=w}), oncelerC $
-			\ _ -> (Rwstat, Done)
-		     )
-	Topen   _ mode -> (mode, fopen, (\ w fh -> fh{fopen=w}), oncelerC $
-				\() -> (Ropen qid iounit, Done)
-			  )
-	Tclunk  _ -> ((), fclunk, (\ w fh -> fh{fclunk=w}), oncelerC $
-			\ _ -> (Rclunk, Done)
-		     )
+	    Tclunk  _ -> ((),
+			  fclunk,
+			  (\ w fh -> fh{fclunk=w}),
+			  oncelerC $ \ _ -> (Rclunk, Done)
+		         )
+	    n -> (n, ferror, (\ w fh -> fh{ferror=w}), id)
 
-data NSH m = NSH {
-    nswalk   :: SrvWire m [String] ([Qid], FidH m),
-    nscreate :: SrvWire m (String, Word32, Word8) (Qid, Word32, FidH m),
-    nsremove :: SrvWire m () (),
-}
-
--- | Operations referencing the current Fid.
-data FidH m = FidH {
-    fnsh    :: NSH m,
-    fstat   :: SrvWire m () Stat,
-    fwstat  :: SrvWire m Stat (),
-    fopen   :: SrvWire m Word8 (Qid, Word32, OpenFidH m),
-    fclunk  :: SrvWire m () ()
-}
-
--- TODO: check what we can do to make these interruptable when flush comes along.
 data OpenFidH m = OpenFidH {
     ofidh :: FidH m,
     ofread :: (SrvWire m) (Word64,Word32) (Word32,ByteString),
@@ -166,8 +164,8 @@ data OpenFidH m = OpenFidH {
 --                                  -> Check for Error and send RError if so.
 -- an error thrown at this level indicates an internal server error.
 -- 
--- This wire keeps an internal state listing all `attached' NameSpace handlers (NSH-s)
--- and tags routed to them.
+-- This wire keeps an internal state listing all 'live' tags, and routes to them.
+-- Mostly, it will run the main wire, which creates a handler for a new tag.
 -- type StrategyWire m a b = Wire b m (Maybe a) (b,Time)
 -- fork :: (Monad m, Ord k)
 --      => Wire e m k (StrategyWire m a b)

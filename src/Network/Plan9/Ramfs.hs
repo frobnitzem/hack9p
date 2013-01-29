@@ -43,16 +43,14 @@ class (Error e) => STMFile e f where
     mstat  :: STMVar f -> Stat
 
 instance (NineFile e f) => STMFile e f where
-    mwstat st sf = atomically $ do
-	v <- readVar sf
-	case runError (wstat st v) of
-		err -> putVar sf v
-		       return err
-		ok v' -> putVar sf v'
-			return (ok())
-    mstat sf = atomically $ do
-	v <- copyVar sf
-	return (stat v)
+    mwstat st sf = runErrorT $ atomically $ do
+	v <- liftIO $ readTVar sf
+	v' <- wstat st v
+	liftIO $ writeTVar sf v'
+    mstat = stat . atomRead
+
+atomRead = atomically . readTVar
+appV fn x = atomically $ readTVar x >>= writeTVar x
 
 instance (NineDir e d f) => STMDir e d f where
     mwalk name sd = atomically $ do

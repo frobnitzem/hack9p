@@ -95,6 +95,7 @@ data NineMsg =
 emptyAuth = Tauth nofid "" ""
 type NinePkt = (Word16,NineMsg)
 
+
 -- | A type that enumerates all the valid /(and one invalid)/ message type in 9P2000
 -- The invalid type would be Terror, but the client initiates all the requests,
 -- so sending it doesn't make sense.  We mapped it to TFail here to denote parse
@@ -166,7 +167,7 @@ emptyStat = Stat {
     st_uid = "",
     st_gid = "",
     st_muid = ""
- {- .u extensions:
+ {- 9P2000.u extensions:
     st_extension = "",
     st_n_uid = 0,
     st_n_gid = 0,
@@ -195,12 +196,12 @@ qtfile =           0x00 :: Word8
 
 -- | st_mode flags
 dmdir =            0x80000000 :: Word32
-dmappend =         0x40000000 :: Word32
-dmexcl =           0x20000000 :: Word32
-dmmount =          0x10000000 :: Word32
-dmauth =           0x08000000 :: Word32
-dmtmp =            0x04000000 :: Word32
--- | 9p2000.u extensions
+dmappend =         0x40000000 :: Word32 -- append-only file (offset is ignored in writes)
+dmexcl =           0x20000000 :: Word32 -- exclusive-use (only one client may have it open at a time)
+dmmount =          0x10000000 :: Word32 -- (Bit 28 is skipped for historical reasons.)
+dmauth =           0x08000000 :: Word32 -- an authentication file established by auth messages
+dmtmp =            0x04000000 :: Word32 -- the contents of the file (or directory) are not included in nightly archives
+-- | 9p2000.u extensions for legacy *?NIX
 dmsymlink =        0x02000000 :: Word32
 dmlink   =         0x01000000 :: Word32 -- mode bit for hard link (Unix, 9P2000.u)
 dmdevice =         0x00800000 :: Word32
@@ -212,13 +213,24 @@ dmsetgid =         0x00040000 :: Word32
 dmread      = 0x4      :: Word8  -- mode bit for read permission
 dmwrite     = 0x2      :: Word8  -- mode bit for write permission
 dmexec      = 0x1      :: Word8  -- mode bit for execute permission
+{- |  The most significant change of 9P2000.u (not implemented here)
+ - to the create operation is the new permission
+ - modes which allow for creation of special files.  In addition to creating
+ - directories with DMDIR, 9P2000.u allows the creation of symlinks (DMSYMLINK),
+ - devices (DMDEVICE), named pipes (DMNAMEPIPE), and sockets (DMSOCKET).
+ - extension[s] is a string describing special files [in the create message
+ - and Stat structures], depending on the mode bit.
+ - For DSYMLINK files, the string is the target of the link. For DMDEVICE files,
+ - the string is "b 1 2" for a block device with major 1, minor 2. For normal
+ - files, this string is empty.
+ -}
 
 
 -- | Special fields specifying blank-ness.
 -- In a Wstat these fields won't modify the stat.
 notag = 0xFFFF     :: Word16 -- no tag specified
 nofid = 0xFFFFFFFF :: Word32 -- no fid specified
-nouid = 0xFFFFFFFF :: Word32 -- no uid specified
+nouid = 0xFFFFFFFF :: Word32 -- no uid specified (9P2000.u extension)
 
 -- | Some Error Numbers from 9P2000.u
 {-
